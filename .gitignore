@@ -35,6 +35,16 @@ data/processed/*
 *.h5
 *.parquet
 
+# Trained model weights (regenerable via scripts/train_model.py)
+models/*
+!models/.gitkeep
+*.pt
+*.pth
+
+# Generated visualizations (regenerable via scripts/run_inference.py etc.)
+outputs/*
+!outputs/.gitkeep
+
 # OS
 .DS_Store
 Thumbs.db
