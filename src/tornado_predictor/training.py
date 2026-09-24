@@ -98,10 +98,27 @@ class QuietMapDownsampler(Sampler):
         return len(self.active_idx) + int(len(self.quiet_idx) * self.quiet_keep_fraction)
 
 
+def evaluate(dataset: DenseGridDataset, model: nn.Module, criterion: nn.Module, batch_size: int = 2) -> float:
+    """Mean loss over every sample in dataset, no gradient updates, no
+    QuietMapDownsampler (a val set should be evaluated on in full, not
+    downsampled -- downsampling exists only to manage training-time
+    imbalance/cost). Restores the model's prior training/eval mode."""
+    was_training = model.training
+    model.eval()
+    losses = []
+    with torch.no_grad():
+        for X, y in DataLoader(dataset, batch_size=batch_size):
+            logits = model(X).squeeze(1)
+            losses.append(criterion(logits, y).item())
+    model.train(was_training)
+    return float(np.mean(losses))
+
+
 def train_model(
     dataset: DenseGridDataset,
     model: nn.Module,
     *,
+    val_dataset: DenseGridDataset | None = None,
     epochs: int = 50,
     batch_size: int = 2,
     lr: float = 1e-3,
@@ -113,8 +130,13 @@ def train_model(
     """Trains model on dataset with FocalLoss + QuietMapDownsampler
     (re-drawing its quiet-map subset each epoch, since DataLoader calls
     iter(sampler) fresh every time the loader is iterated). Returns
-    {"loss_history": [...], "hyperparameters": {...}}; saving
+    {"loss_history": [...], "hyperparameters": {...}}, plus
+    "val_loss_history" if val_dataset is given; saving
     model.state_dict() is the caller's responsibility.
+
+    val_dataset should come from split.split_run_bins -- a leakage-safe
+    split, not an arbitrary held-out set -- and is evaluated on in full
+    each epoch (see evaluate()), never used for gradient updates.
 
     Model weight initialization is the only training-relevant source of
     torch-level randomness this function doesn't control -- call
@@ -128,6 +150,7 @@ def train_model(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     loss_history = []
+    val_loss_history = [] if val_dataset is not None else None
     for _ in range(epochs):
         epoch_losses = []
         for X, y in loader:
@@ -138,8 +161,10 @@ def train_model(
             optimizer.step()
             epoch_losses.append(loss.item())
         loss_history.append(float(np.mean(epoch_losses)))
+        if val_dataset is not None:
+            val_loss_history.append(evaluate(val_dataset, model, criterion, batch_size=batch_size))
 
-    return {
+    result = {
         "loss_history": loss_history,
         "hyperparameters": {
             "epochs": epochs,
@@ -151,3 +176,6 @@ def train_model(
             "seed": seed,
         },
     }
+    if val_dataset is not None:
+        result["val_loss_history"] = val_loss_history
+    return result

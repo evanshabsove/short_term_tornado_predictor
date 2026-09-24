@@ -101,12 +101,45 @@ projection math.
   is otherwise valid); `assign_valid_time_bin` maps an arbitrary
   absolute UTC timestamp (e.g. an SPC report, which is not on the
   hour) to a bin using continuous lead-time hours.
-- **Known future constraint (not solved here):** HRRR's public
-  archive availability starts well after 2012 (closer to 2014–2018
-  depending on HRRR version/source reliability), while the SPC report
-  range currently spans 2012–2022. The real usable training period
-  will be the intersection of the two, narrower than the full SPC
-  range — flagged for a future session, not addressed by this module.
+- **Training period (locked in, resolved from an earlier "known future
+  constraint"): ~Sept 2014 – Sept 2025.** Verified live, not assumed:
+  - Lower bound is HRRR's actual public AWS archive start
+    (`noaa-hrrr-bdp-pds`) — confirmed via HTTP HEAD checks: 404 before
+    ~Aug 15 2014, 200 after.
+  - **HRRR's native grid, all needed fields, and forecast length are
+    identical all the way back to Sept 2014** — confirmed by pulling
+    live GRIB metadata (Nx/Ny, LCC projection params, Dx/Dy) and `.idx`
+    field listings at 2014, 2016, 2017, and 2018 test dates, all
+    matching `grid.py`'s constants and `features.py`'s field table
+    exactly. Also confirmed fxx=7 (needed for bin 1) is available even
+    on off-synoptic hourly runs back to Sept 2014. **There is no
+    structural reason tied to HRRR versions (v1/v2/v3/v4) to start
+    later than 2014** — resolution and grid did not change; only
+    model physics/skill improved over versions, which is a data-quality
+    consideration, not an availability one.
+  - Upper bound is **SPC's label data, not HRRR** — HRRR itself is
+    produced continuously to the present. SPC's published bulk file
+    (`1950-2025_actual_tornadoes.csv`) was confirmed live to currently
+    end at 2025-09-09 — SPC's ground truth lags real time by roughly a
+    year (likely survey/QC completion), so labels, not HRRR, are the
+    binding constraint on the upper end.
+  - SPC reports are now downloaded/parsed for this range:
+    `data/processed/spc_tornado_reports_2014_2025.csv` (15,294 reports,
+    up from 12,649 for the original, arbitrarily-chosen 2012–2022
+    range) via `scripts/download_spc_tornado_reports.py` (defaults
+    updated to `--start-year 2014 --end-year 2025`). The labels table
+    was rebuilt to match: `data/processed/tornado_labels_2014_2025.csv`
+    (147,440 rows; 111,580 unique positives) via `scripts/build_labels.py`
+    (defaults updated to match). All downstream default paths
+    (`scripts/build_training_dataset.py`, `scripts/validate_documented_case.py`,
+    `tests/test_labels.py`) were repointed to the new filenames; the
+    old `_2012_2022` files were deleted (gitignored/regenerable, not a
+    data-loss concern). The existing pilot dataset/checkpoint/notebook
+    (all built from within-range 2021-12-10/11 runs) needed no rebuild
+    — their content was already materialized and unaffected by the
+    rename.
+  - This does not by itself scale the training dataset — it only
+    defines the target range for that future work.
 - Do not change `BIN_EDGES_HOURS` or the every-hourly-run decision
   without discussing with the user first — later labeling/feature
   aggregation depends on both.
@@ -178,12 +211,13 @@ projection math.
   fabricating a synthetic track-speed/duration; don't attempt that
   without discussing with the user first.
 - **Only positive labels are materialized.** The output table
-  (`data/processed/tornado_labels_2012_2022.csv`) contains one row per
+  (`data/processed/tornado_labels_2014_2025.csv`) contains one row per
   `(event_id, init_time, bin_index, row, col)` — every row is an
   implicit label of 1; anything not present is an implicit 0. The full
-  0-label space is not (and can't yet be) materialized — there's no
-  defined training-run list until the HRRR-archive-availability gap
-  (see "Time binning" above) is resolved.
+  0-label space is still not materialized — even with the training
+  period now defined (~Sept 2014 – Sept 2025, see "Time binning"
+  above), that's ~2.19 billion `(run, bin, cell)` combinations, not yet
+  built as an actual training-run list (a future scaling step).
 - **Row granularity is per-(event, run, cell), not deduplicated.** One
   report produces `(number of cells it touches) x 8` rows (always
   exactly 8 candidate runs per `time_bins`), preserving which report(s)
@@ -195,14 +229,14 @@ projection math.
   polygon (a zero-radius buffer of a straight line is empty in shapely,
   silently dropping the report) — `labels.buffer_radius_m` raises
   rather than allowing this to pass silently. Not observed in the
-  2012–2022 CSV, but not guaranteed for other date ranges.
-- Validated against the real dataset: exactly 10 of 12,649 reports fall
-  outside the grid domain (matches the known out-of-bounds count from
-  grid validation), and the single outlier with >10 affected cells (13)
-  is the December 10, 2021 Quad-State/Mayfield EF4 — the longest track
-  in the dataset (~165 miles) — not a bug.
+  2014–2025 CSV, but not guaranteed for other date ranges.
+- Validated against the real dataset: 12 of 15,294 reports fall outside
+  the grid domain (proportionally consistent with the original
+  2012–2022 pass's 10/12,649), and the single outlier with >10 affected
+  cells (13) is still the December 10, 2021 Quad-State/Mayfield EF4 —
+  the longest track in the dataset (~165 miles) — not a bug.
 
-### Consolidated training dataset (pilot, not locked in)
+### Consolidated training dataset (pilot + first scale-up)
 
 `src/tornado_predictor/dataset.py` combines feature extraction and
 labeling across multiple HRRR runs into one dataset, via
@@ -233,9 +267,63 @@ labeling across multiple HRRR runs into one dataset, via
   that night) — chosen specifically because it's within the labeled
   SPC range *and* produces genuine positive labels (167 positive
   (sample, cell) pairs across all 6 samples), not an all-zero sanity
-  check. Scaling this to a real training-period date range is still
-  blocked on the HRRR-archive-availability gap (see "Time binning"
-  above) — not resolved by this pilot.
+  check.
+
+### First scale-up (44 train / 6 val samples)
+
+Built via `scripts/build_training_dataset.py`, applying `split.py`'s
+leakage-safe split (see above) to a **stratified sample of 25 dates**
+(2014–2025) rather than the full training period — deliberately
+sized down, per an explicit scope decision, to something that
+completes in one interactive session (~200 HRRR pulls) while
+meaningfully exercising the pipeline at real scale, not the full
+multi-year archive (that's further-out future work).
+
+- **Date selection**: 12 real high-activity dates (one busiest day per
+  year 2014–2025, by SPC report count that day — e.g. 2014-09-01 IA
+  outbreak, 2021-12-15, 2024-12-29) + 13 genuine quiet dates (verified
+  zero SPC reports that day, spread across years and seasons — the
+  first time this project has included real negative-class diversity;
+  every previous dataset was 100% positive). One run per date (20:00
+  UTC, a fixed representative hour for every date — a deliberate
+  simplification, not a per-event-tuned choice, same spirit as the
+  single-representative-fxx-per-bin approximation above).
+- **A real date-selection bug was caught before it silently corrupted
+  the dataset**: `2014-02-10` was initially picked as a quiet date
+  without cross-checking it against the verified HRRR archive start
+  (~Aug 15, 2014) — it's *before* the archive begins, so the pull
+  correctly failed loudly (`"Did not find"` from Herbie) rather than
+  silently returning wrong data. Fixed by swapping in `2014-11-10`
+  (verified quiet AND within the archive) before re-running. Any
+  future date selection must check both conditions.
+- **Result**: 44 train samples (13 active / 31 quiet — `QuietMapDownsampler`
+  finally does real, non-trivial work for the first time) / 6 val
+  samples (3 active / 3 quiet), split 44/6 by the deterministic
+  mod-20 rule with 0 dropped by the buffer safeguard (the 25 dates are
+  naturally well-separated).
+  `data/processed/training_dataset_train_scaled.nc` /
+  `training_dataset_val_scaled.nc`.
+- **Training result** (`models/tornado_cnn_scaled.pt`, 50 epochs,
+  `quiet_keep_fraction=0.5`): loss and val loss both converge smoothly
+  to ~0.0002–0.0003 — much lower in absolute terms than the 10-sample
+  pilot's ~0.0007/0.0017, but this is **not** a sign of better fit; a
+  mostly-quiet dataset naturally has lower mean loss regardless of
+  discriminative quality (most cells are easy true-negatives).
+- **The honest, important finding**: probability separation between
+  positive and negative cells on the **held-out val set** is much
+  weaker than the pilot's training-set-only numbers ever showed —
+  ranging from ~2.5x (one val sample) to ~50x (another) rather than
+  the pilot's consistent ~40–90x, and one positive cell in a 14-cell
+  val sample got a probability of ~9e-6 (essentially zero — a clear
+  miss). This is the first genuine generalization signal this project
+  has produced, and it says plainly: **44 training samples is still
+  not enough.** Not addressed here — surfacing it accurately is the
+  point of having a real val set; don't paper over it with a rosier
+  training-loss-only story.
+- Scaling further toward the full ~Sept 2014 – Sept 2025 training
+  period (see "Time binning" above) is the natural next step, now that
+  the archive-availability question is resolved and this smaller
+  scale-up has validated the mechanics.
 
 ### Validation against a documented case
 
@@ -270,12 +358,14 @@ throughout.
 this ticket (`torch==2.8.0` now a dependency). This is how the dense
 grid's class imbalance is handled once modeling starts:
 
-- Grounded in this project's real numbers (`tornado_labels_2012_2022.csv`):
-  training on every hourly HRRR run 2012–2022 would give a per-cell
-  positive rate of ~4.3e-05 (~1 in 23,000), but ~15% of `(run, bin)`
-  grid-maps contain at least one positive cell — most of the imbalance
-  is "positives are rare within an active map," not "active maps are
-  rare."
+- Grounded in this project's real numbers (`tornado_labels_2014_2025.csv`):
+  training on every hourly HRRR run in this period would give a
+  per-cell positive rate of ~5.1e-05 (~1 in 19,600), but ~17% of
+  `(run, bin)` grid-maps contain at least one positive cell — most of
+  the imbalance is "positives are rare within an active map," not
+  "active maps are rare." (These are updated figures after the SPC
+  range was extended from 2012–2022 to 2014–2025 — same order of
+  magnitude, not a materially different picture.)
 - **Focal loss over per-cell class weighting**, and **quiet-map
   downsampling over per-cell downsampling** — per-cell downsampling
   isn't really executable for a spatial CNN (can't drop arbitrary
@@ -447,18 +537,85 @@ project's model, for the exact same real tornado.
   dependencies) — `jupyter nbconvert --to notebook --execute --inplace
   notebooks/case_study_prediction_vs_detection.ipynb` to regenerate.
 
+### Train/val split (locked in)
+
+`src/tornado_predictor/split.py` splits a `run_bins` list into
+train/val without leakage, via `scripts/build_training_dataset.py`
+(now produces two files instead of one) and `training.train_model()`
+(now optionally tracks val loss per epoch via `training.evaluate()`).
+
+- **Adapted from the TorNet benchmark paper's actual methodology**
+  (Veillette et al. 2024, verified by reading the paper directly, not
+  from memory), not invented from scratch. TorNet groups by NOAA Storm
+  Events Database "storm episode" and splits via `day-of-year mod 20 <
+  17 -> train` (an 85/15 split chosen so both splits see the full
+  seasonal cycle every year, not a lucky/unlucky year range), with a
+  30-minute-and-0.25°-buffer removing training samples too close to
+  test samples.
+- **Split unit here is UTC calendar date of `init_time`**, not storm
+  episode — the honest analog given our samples are full-domain maps,
+  not storm-centered crops. Every `(run, bin)` sample from the same
+  date is correlated regardless of which cell is being looked at, so
+  the whole date goes to one split, never split across both. Same
+  `mod 20 < 17` rule, same 85/15 ratio.
+- **Buffer safeguard is temporal-only** (`DEFAULT_BUFFER_HOURS = 24`)
+  — TorNet's spatial half doesn't apply since every sample already
+  covers the whole domain. This exists because the mod-20 rule flips
+  abruptly twice every 20-day cycle (verified concretely: 2021-12-02 →
+  train, 2021-12-03 → val, consecutive calendar days, opposite
+  splits) — roughly 10% of all days sit next to a boundary like this,
+  not a rare edge case. A training sample is **dropped, not
+  reassigned**, if within the buffer of any val sample — mirrors
+  TorNet's own choice exactly.
+- **Does NOT attempt tornadic/non-tornadic balance via the split rule**
+  — TorNet achieves that at corpus-construction time (which samples
+  exist at all, via its three sample categories), a decision this
+  project makes separately when a training run/date list is assembled
+  (ticket 3 in the modeling roadmap, not this module).
+  `report_split_balance()` reports the resulting positive rate per
+  split so an accidental imbalance is caught, not silently shipped —
+  it does not correct for one.
+- **Validated with a genuine two-outbreak split**, not just offline
+  unit tests: the existing Dec 2021 pilot runs (all land on `train`,
+  day 344 mod 20 = 4) plus real runs from the April 26–27, 2024
+  outbreak (`val`, day 117 mod 20 = 17) — real IA/MO tornado activity,
+  not a synthetic date. Result: 6 train / 4 val samples, 0 dropped by
+  the buffer (the two outbreaks are months apart), 100% positive rate
+  in both splits (`data/processed/training_dataset_train.nc`,
+  `training_dataset_val.nc`).
+- **Training with the real split surfaced a genuine, expected
+  overfitting signature at this tiny scale**: val loss drops sharply
+  then plateaus around epoch 10–15 (~0.0015) while train loss keeps
+  improving to ~0.0006 — exactly the divergence a validation set exists
+  to catch. Not addressed here (would need more data/regularization,
+  future work); recorded because a working val split that reveals
+  nothing informative would be a red flag, not a good sign.
+- `training.evaluate()` runs the *entire* val set every epoch, no
+  `QuietMapDownsampler` (downsampling exists to manage training-time
+  cost/imbalance, not appropriate for evaluation) — restores whatever
+  `model.training`/`model.eval()` state the caller had before it ran.
+
 ## Current status
 
 Repo scaffolding, data collection, the spatial grid, time binning,
 feature extraction, labeling, the class-imbalance training utilities, a
 baseline CNN architecture, a first end-to-end training run,
-inference/visualization, and a prediction-vs-detection case study
-notebook are all in place; scaling to a real training period and true
-generalization evaluation have not started yet.
+inference/visualization, a prediction-vs-detection case study notebook,
+a resolved, verified training-period decision (~Sept 2014 – Sept 2025),
+a leakage-safe train/val split, and a first stratified scale-up (44
+train / 6 val samples across 25 dates, with real quiet-day negatives
+for the first time) are all in place. The scale-up's own held-out
+validation results are the clearest signal yet of what's still needed:
+significantly more training data before generalization is real.
+Scaling further toward the full training period is the next step.
 
-- SPC tornado reports (2012–2022) downloaded and parsed to
-  `data/processed/spc_tornado_reports_2012_2022.csv`, including full
-  track geometry (`path_wkt`) — see `scripts/download_spc_tornado_reports.py`.
+- SPC tornado reports (2014–2025) downloaded and parsed to
+  `data/processed/spc_tornado_reports_2014_2025.csv` (15,294 reports),
+  including full track geometry (`path_wkt`) — see
+  `scripts/download_spc_tornado_reports.py`. Range extended from an
+  initial, arbitrarily-chosen 2012–2022 (picked to loosely match the
+  sibling TorNet project) once the real HRRR-archive-availability
+  question was actually investigated (see "Time binning" above).
 - HRRR pulls via Herbie confirmed working (`scripts/smoke_test_herbie.py`).
 - The ~40km grid is defined (see above): `src/tornado_predictor/grid.py`.
 - The 0–8h per-run time-binning scheme is defined (see above):
@@ -468,13 +625,16 @@ generalization evaluation have not started yet.
   across a time bin's fxx values.
 - Tornado report labeling is implemented (see above) and produces a
   sparse positive-label table at
-  `data/processed/tornado_labels_2012_2022.csv`.
-- A pilot consolidated (sample, row, col) training dataset combining
+  `data/processed/tornado_labels_2014_2025.csv` (147,440 rows, 111,580
+  unique positives).
+- A consolidated (sample, row, col) training dataset pipeline combining
   features + labels is working end-to-end (see above):
-  `src/tornado_predictor/dataset.py`, `data/processed/training_dataset_pilot.nc`.
-  Not yet scaled to a real training-period date range (still blocked
-  on the HRRR-archive-availability gap) and not yet aggregating full
-  bins (single representative fxx per bin only).
+  `src/tornado_predictor/dataset.py`. Two builds exist: the original
+  6-sample single-outbreak pilot (`training_dataset_pilot.nc`) and a
+  first stratified scale-up (44 train / 6 val across 25 dates,
+  `training_dataset_train_scaled.nc`/`training_dataset_val_scaled.nc`).
+  Not yet scaled to the full training period, and not yet aggregating
+  full bins (single representative fxx per bin only).
 - The class-imbalance training utilities (focal loss, dataset wrapper,
   quiet-map downsampler) are implemented and tested (see above):
   `src/tornado_predictor/training.py`. `torch` is now a dependency.
@@ -495,6 +655,14 @@ generalization evaluation have not started yet.
   6-sample pilot. Scaling past that pilot is the next real step.
 - A prediction-vs-detection case study notebook is built and executed
   (see above): `notebooks/case_study_prediction_vs_detection.ipynb`.
+- A leakage-safe train/val split is implemented and validated on both a
+  small two-outbreak example and the larger 25-date scale-up (see
+  above): `src/tornado_predictor/split.py`. `training.train_model()`
+  now optionally tracks val loss per epoch — surfaced a real
+  overfitting signature at pilot scale, and at the scale-up's larger
+  size, surfaced the more important finding that held-out
+  positive/negative separation is still weak (~2.5–50x, not the
+  training-set-only ~40–90x) — real evidence more data is needed.
 - `requirements.txt` has data-handling deps (`herbie-data`, `xarray`,
   `numpy`, `pandas`, `netCDF4`, `matplotlib`, `shapely`, `pyproj`,
   `pytest`), `torch` as the first ML dependency, and `nbconvert`/

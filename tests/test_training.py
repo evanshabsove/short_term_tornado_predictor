@@ -6,12 +6,12 @@ import torch
 import xarray as xr
 
 from tornado_predictor.model import TornadoCNN
-from tornado_predictor.training import DenseGridDataset, FocalLoss, QuietMapDownsampler, train_model
+from tornado_predictor.training import DenseGridDataset, FocalLoss, QuietMapDownsampler, evaluate, train_model
 
 PILOT_DATASET_PATH = Path(__file__).resolve().parents[1] / "data" / "processed" / "training_dataset_pilot.nc"
 
 
-def _tiny_synthetic_nc(tmp_path, n_samples=10, n_active=3):
+def _tiny_synthetic_nc(tmp_path, n_samples=10, n_active=3, name="synthetic.nc"):
     rng = np.random.default_rng(0)
     row, col = 5, 6
     label = np.zeros((n_samples, row, col), dtype=np.int8)
@@ -25,7 +25,7 @@ def _tiny_synthetic_nc(tmp_path, n_samples=10, n_active=3):
         },
         coords={"sample": np.arange(n_samples), "row": np.arange(row), "col": np.arange(col)},
     )
-    path = tmp_path / "synthetic.nc"
+    path = tmp_path / name
     ds.to_netcdf(path)
     return path, n_active, n_samples - n_active
 
@@ -178,3 +178,59 @@ def test_train_model_reduces_loss_on_real_pilot_dataset():
     assert len(loss_history) == 30
     assert all(np.isfinite(loss) for loss in loss_history)
     assert loss_history[-1] < loss_history[0], "expected the model to fit the 6-sample pilot dataset over 30 epochs"
+
+
+# --- evaluate / val_dataset wiring ---
+
+
+def test_evaluate_restores_prior_training_mode(tmp_path):
+    path, _, _ = _tiny_synthetic_nc(tmp_path)
+    dataset = DenseGridDataset(str(path))
+    model = TornadoCNN(in_channels=2, hidden_channels=4)
+    criterion = FocalLoss()
+
+    model.train()
+    evaluate(dataset, model, criterion)
+    assert model.training  # restored to train mode
+
+    model.eval()
+    evaluate(dataset, model, criterion)
+    assert not model.training  # restored to eval mode
+
+
+def test_evaluate_does_not_update_weights(tmp_path):
+    path, _, _ = _tiny_synthetic_nc(tmp_path)
+    dataset = DenseGridDataset(str(path))
+    model = TornadoCNN(in_channels=2, hidden_channels=4)
+    criterion = FocalLoss()
+
+    before = [p.clone() for p in model.parameters()]
+    evaluate(dataset, model, criterion)
+    after = list(model.parameters())
+
+    assert all(torch.equal(b, a) for b, a in zip(before, after))
+
+
+def test_train_model_with_val_dataset_reports_val_loss_history(tmp_path):
+    train_path, _, _ = _tiny_synthetic_nc(tmp_path, n_samples=6, n_active=3, name="train.nc")
+    val_path, _, _ = _tiny_synthetic_nc(tmp_path, n_samples=4, n_active=2, name="val.nc")
+
+    train_dataset = DenseGridDataset(str(train_path))
+    val_dataset = DenseGridDataset(str(val_path))
+    model = TornadoCNN(in_channels=2, hidden_channels=4)
+
+    result = train_model(train_dataset, model, val_dataset=val_dataset, epochs=3, batch_size=2, seed=0)
+
+    assert "val_loss_history" in result
+    assert len(result["val_loss_history"]) == 3
+    assert all(np.isfinite(loss) for loss in result["val_loss_history"])
+
+
+def test_train_model_without_val_dataset_omits_val_loss_history(tmp_path):
+    path, _, _ = _tiny_synthetic_nc(tmp_path)
+    dataset = DenseGridDataset(str(path))
+    model = TornadoCNN(in_channels=2, hidden_channels=4)
+
+    result = train_model(dataset, model, epochs=2, batch_size=2, seed=0)
+
+    assert "val_loss_history" not in result

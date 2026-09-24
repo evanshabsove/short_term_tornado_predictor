@@ -61,7 +61,7 @@ def test_degenerate_start_equals_end_track():
 
 
 def test_real_degenerate_track_from_spc_csv_matches_start_point_cell():
-    csv_path = Path(__file__).resolve().parents[1] / "data" / "processed" / "spc_tornado_reports_2012_2022.csv"
+    csv_path = Path(__file__).resolve().parents[1] / "data" / "processed" / "spc_tornado_reports_2014_2025.csv"
     if not csv_path.exists():
         pytest.skip("SPC reports CSV not present")
     df = pd.read_csv(csv_path)

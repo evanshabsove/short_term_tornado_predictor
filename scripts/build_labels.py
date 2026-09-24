@@ -6,7 +6,7 @@ every row is an implicit label of 1; anything absent is an implicit 0.
 
 Usage:
     python scripts/build_labels.py
-    python scripts/build_labels.py --reports data/processed/spc_tornado_reports_2012_2022.csv --grid data/processed/hrrr_coarse_grid_stride13.nc --out data/processed/tornado_labels_2012_2022.csv
+    python scripts/build_labels.py --reports data/processed/spc_tornado_reports_2014_2025.csv --grid data/processed/hrrr_coarse_grid_stride13.nc --out data/processed/tornado_labels_2014_2025.csv
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ from tornado_predictor.grid import HrrrCoarseGrid
 from tornado_predictor.labels import build_positive_labels
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_REPORTS_PATH = REPO_ROOT / "data" / "processed" / "spc_tornado_reports_2012_2022.csv"
+DEFAULT_REPORTS_PATH = REPO_ROOT / "data" / "processed" / "spc_tornado_reports_2014_2025.csv"
 DEFAULT_GRID_PATH = REPO_ROOT / "data" / "processed" / "hrrr_coarse_grid_stride13.nc"
-DEFAULT_OUT_PATH = REPO_ROOT / "data" / "processed" / "tornado_labels_2012_2022.csv"
+DEFAULT_OUT_PATH = REPO_ROOT / "data" / "processed" / "tornado_labels_2014_2025.csv"
 
 
 def print_sanity_summary(reports_df: pd.DataFrame, labels_df: pd.DataFrame) -> None:

@@ -48,9 +48,9 @@ from tornado_predictor.labels import cells_for_report
 from tornado_predictor.time_bins import assign_valid_time_bin, candidate_run_inits
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-REPORTS_PATH = REPO_ROOT / "data" / "processed" / "spc_tornado_reports_2012_2022.csv"
+REPORTS_PATH = REPO_ROOT / "data" / "processed" / "spc_tornado_reports_2014_2025.csv"
 GRID_PATH = REPO_ROOT / "data" / "processed" / "hrrr_coarse_grid_stride13.nc"
-LABELS_PATH = REPO_ROOT / "data" / "processed" / "tornado_labels_2012_2022.csv"
+LABELS_PATH = REPO_ROOT / "data" / "processed" / "tornado_labels_2014_2025.csv"
 
 ANCHOR_EVENT_ID = "2021_2112101907-01"
 

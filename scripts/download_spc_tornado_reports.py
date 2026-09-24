@@ -16,7 +16,7 @@ down in.
 
 Usage:
     python scripts/download_spc_tornado_reports.py
-    python scripts/download_spc_tornado_reports.py --start-year 2012 --end-year 2022
+    python scripts/download_spc_tornado_reports.py --start-year 2014 --end-year 2025
 """
 
 from __future__ import annotations
@@ -122,8 +122,8 @@ def parse_tornado_reports(raw_csv: Path, start_year: int, end_year: int) -> pd.D
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--start-year", type=int, default=2012)
-    parser.add_argument("--end-year", type=int, default=2022)
+    parser.add_argument("--start-year", type=int, default=2014)
+    parser.add_argument("--end-year", type=int, default=2025)
     parser.add_argument("--force-download", action="store_true", help="Re-download even if cached")
     args = parser.parse_args()
 

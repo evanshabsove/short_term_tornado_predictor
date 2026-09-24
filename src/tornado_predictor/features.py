@@ -25,6 +25,8 @@ several fxx snapshots into one time_bins bin is a separate future step.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import xarray as xr
 from herbie import Herbie
@@ -57,19 +59,37 @@ FIELD_UNITS: dict[str, str] = {
 }
 
 
-def pull_hrrr_field(init_time, fxx: int, search_string: str) -> np.ndarray:
+def pull_hrrr_field(init_time, fxx: int, search_string: str, max_attempts: int = 3) -> np.ndarray:
     """One Herbie pull for a single field; returns its raw native-grid
     2D array. Asserts the shape matches HRRR's documented native grid --
     fail loud if a pull ever returns something unexpected (wrong
-    product, cropped subset) rather than silently mis-pooling later."""
-    H = Herbie(init_time, model="hrrr", product="sfc", fxx=fxx)
-    ds = H.xarray(search_string)
-    da = next(iter(ds.data_vars.values()))
-    array = da.values
-    assert array.shape == (HRRR_NY, HRRR_NX), (
-        f"unexpected shape {array.shape} for {search_string!r}, expected {(HRRR_NY, HRRR_NX)}"
-    )
-    return array
+    product, cropped subset) rather than silently mis-pooling later.
+
+    Retries up to max_attempts times with a short backoff -- for a
+    large batch job (thousands of pulls over many hours), transient
+    network blips and corrupted-cache reads (see CLAUDE.md's
+    "corrupted local GRIB cache" incident) are expected occasionally;
+    retrying is cheap and avoids failing an entire date over one flaky
+    request. Does not distinguish transient failures from a genuinely
+    missing date (e.g. before HRRR's archive starts) -- both raise
+    after max_attempts, which the caller should treat as a real
+    failure to record and move on from, not retry indefinitely."""
+    last_error = None
+    for attempt in range(max_attempts):
+        try:
+            H = Herbie(init_time, model="hrrr", product="sfc", fxx=fxx)
+            ds = H.xarray(search_string)
+            da = next(iter(ds.data_vars.values()))
+            array = da.values
+            assert array.shape == (HRRR_NY, HRRR_NX), (
+                f"unexpected shape {array.shape} for {search_string!r}, expected {(HRRR_NY, HRRR_NX)}"
+            )
+            return array
+        except Exception as e:
+            last_error = e
+            if attempt < max_attempts - 1:
+                time.sleep(2 * (attempt + 1))
+    raise last_error
 
 
 def pull_all_fields(init_time, fxx: int) -> dict[str, np.ndarray]:
