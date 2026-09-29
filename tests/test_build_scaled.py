@@ -2,11 +2,23 @@ import json
 
 import pandas as pd
 
-from tornado_predictor.build_scaled import ARCHIVE_START, load_manifest, save_manifest, select_active_dates, select_quiet_dates
+from tornado_predictor.build_scaled import (
+    ARCHIVE_START,
+    greedy_cover_run_inits,
+    load_manifest,
+    save_manifest,
+    select_active_dates,
+    select_active_runs,
+    select_quiet_dates,
+)
 
 
 def _synthetic_reports(dates):
     return pd.DataFrame({"timestamp_utc": [pd.Timestamp(f"{d} 18:30") for d in dates]})
+
+
+def _synthetic_reports_at(timestamps):
+    return pd.DataFrame({"timestamp_utc": [pd.Timestamp(t) for t in timestamps]})
 
 
 def test_select_active_dates_deduplicates_and_normalizes_to_calendar_date():
@@ -62,3 +74,54 @@ def test_save_manifest_creates_parent_directory(tmp_path):
     save_manifest(path, {"a": 1})
     assert path.exists()
     assert json.loads(path.read_text()) == {"a": 1}
+
+
+def test_greedy_cover_single_report_anchors_at_its_floored_hour():
+    runs = greedy_cover_run_inits([pd.Timestamp("2020-05-01 14:37")])
+    assert runs == [pd.Timestamp("2020-05-01 14:00")]
+
+
+def test_greedy_cover_two_close_reports_share_one_run():
+    # 14:10 and 18:00 are 3h50m apart -- both fall within [14:00, 22:00)
+    runs = greedy_cover_run_inits([pd.Timestamp("2020-05-01 14:10"), pd.Timestamp("2020-05-01 18:00")])
+    assert runs == [pd.Timestamp("2020-05-01 14:00")]
+
+
+def test_greedy_cover_two_far_reports_need_two_runs():
+    # 06:00 and 20:00 are 14h apart -- 20:00 falls outside [06:00, 14:00)
+    runs = greedy_cover_run_inits([pd.Timestamp("2020-05-01 06:00"), pd.Timestamp("2020-05-01 20:00")])
+    assert runs == [pd.Timestamp("2020-05-01 06:00"), pd.Timestamp("2020-05-01 20:00")]
+
+
+def test_greedy_cover_is_half_open_at_the_8h_boundary():
+    # a report exactly 8h after the anchor is NOT covered (half-open window,
+    # same convention as time_bins.BIN_EDGES_HOURS) -- must get its own run
+    runs = greedy_cover_run_inits([pd.Timestamp("2020-05-01 06:00"), pd.Timestamp("2020-05-01 14:00")])
+    assert runs == [pd.Timestamp("2020-05-01 06:00"), pd.Timestamp("2020-05-01 14:00")]
+
+
+def test_greedy_cover_unsorted_input_and_empty_input():
+    runs = greedy_cover_run_inits([pd.Timestamp("2020-05-01 20:00"), pd.Timestamp("2020-05-01 06:00")])
+    assert runs == [pd.Timestamp("2020-05-01 06:00"), pd.Timestamp("2020-05-01 20:00")]
+    assert greedy_cover_run_inits([]) == []
+
+
+def test_select_active_runs_covers_multiple_dates_independently():
+    reports_df = _synthetic_reports_at([
+        "2020-05-01 14:10",  # date 1: single report -> 1 run
+        "2020-05-02 06:00",  # date 2: two far-apart reports -> 2 runs
+        "2020-05-02 20:00",
+    ])
+    runs = select_active_runs(reports_df)
+    assert runs == [
+        pd.Timestamp("2020-05-01 14:00"),
+        pd.Timestamp("2020-05-02 06:00"),
+        pd.Timestamp("2020-05-02 20:00"),
+    ]
+
+
+def test_select_active_runs_excludes_dates_before_archive_start():
+    reports_df = _synthetic_reports_at(["2014-08-20 12:00", "2014-09-01 12:00"])
+    runs = select_active_runs(reports_df)
+    assert all(r >= ARCHIVE_START for r in runs)
+    assert len(runs) == 1

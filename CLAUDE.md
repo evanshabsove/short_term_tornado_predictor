@@ -325,6 +325,93 @@ multi-year archive (that's further-out future work).
   the archive-availability question is resolved and this smaller
   scale-up has validated the mechanics.
 
+### Full-scale build v1 (superseded — see v2 below)
+
+Built via `scripts/build_scaled_dataset.py` + `src/tornado_predictor/build_scaled.py`
+(see that module's docstring for the manifest-based resumable design).
+Per explicit user direction ("everything all active and quiet days...
+happy to have this running in the background"), this covers **every**
+UTC calendar date with >=1 SPC tornado report in the ~Sept 2014–Sept
+2025 archive window (2,044 active dates), plus 300 randomly-sampled
+quiet dates (`seed=0`) — 2,344 dates total, one HRRR run per date
+(20:00 UTC, same fixed-representative-hour simplification as the first
+scale-up). Ran unattended over ~30 hours wall time.
+
+- **2,279 of 2,344 dates succeeded (97.2%); 65 failed** after
+  `features.py`'s internal retries were exhausted. **Failures cluster
+  entirely in 2014–2018** (13 in Sept 2014 near the archive-start edge,
+  the rest scattered through 2015–2018) — **zero failures from 2019
+  onward**. Consistent with the earlier-discovered Sept 2014
+  reduced-field-set issue (see "Time binning" above): the earliest
+  years of AWS's HRRR archive are less complete/consistent than later
+  years, not a bug in this pipeline.
+- **Split result**: 3,578 train / 682 val / 298 dropped by the buffer.
+  1,660/3,578 train maps (46%) and 325/682 val maps (48%) were
+  "active" (>=1 positive cell), per-cell positive rate ~1.5e-04.
+- **Superseded by v2 below.** A data-exploration pass
+  (`notebooks/data_exploration.ipynb`) surfaced that only 46-48% of
+  maps built from dates specifically chosen for having a confirmed
+  report were actually "active" — lower than expected. Auditing found
+  the cause: this build's one-fixed-20:00-UTC-run-per-date design
+  missed a real tornado on **27.2% of active dates entirely** (541 of
+  1,989), because most active dates have multiple reports spread
+  across many hours (median spread ~10.8h on multi-report days; only
+  46% fit inside one 8h window) — the single fixed run's window simply
+  didn't bracket most of them. Not a labeling bug (`labels.py` was
+  already correct); the bug was in which of a report's 8 valid
+  candidate runs this build chose to actually pull.
+- Archived, not deleted, for reference:
+  `data/processed/training_dataset_{train,val}_full_v1_superseded.nc`.
+
+### Full-scale build v2 (report-covering runs, canonical)
+
+Fixes v1's run-selection gap. `build_scaled.select_active_runs` uses a
+greedy interval-covering algorithm per active date: anchor a run at
+the earliest not-yet-covered report's hour, skip every report within
+the next 8h (already covered), repeat for whatever's left — the
+minimum number of runs needed so *every* report that date is captured
+by some run's 0-8h window (see `build_scaled.py`'s docstring for the
+full derivation). Checked against the real report data before
+launching: only 3,209 runs needed for 2,163 active dates (1.48x, not
+8x) — 1,305 dates need just 1 run, 670 need 2, 188 need 3. Quiet dates
+are unchanged (still exactly 1 fixed-hour run each — no report to
+anchor to, so any hour is equally representative). The unit of work
+changed from "date" to "run" (`process_one_run`, keyed by full
+init_time, since a date can now need multiple runs); `finalize` still
+groups by calendar date for the train/val split, so multi-run dates
+split as one unit, unchanged from before.
+
+- Validated on real data before the full run: pulled 5 real runs
+  across 2 known multi-report dates and confirmed 9 of 10 resulting
+  samples came out active (vs. what v1's single-run design would have
+  caught).
+- **3,335 total runs targeted** (3,035 active + 300 quiet) vs. v1's
+  2,344 — 1.4x the volume, as predicted. **3,183 succeeded (95.5%)
+  after one retry pass** (`--retry-failed` recovered 40 of the first
+  attempt's 192 failures — most were transient `EOFError`/
+  `ConnectionError`/`PrematureEndOfFileError`, not archive gaps like
+  v1's failures were; 152 still failed, scattered across 2014–2021 and
+  2025 with no strong pattern, not investigated further).
+- **Split result**: 5,078 train / 980 val / 308 dropped by the buffer
+  — meaningfully more samples than v1 (6,058 vs. 4,260 total) from
+  fewer targeted active dates, because runs are no longer wasted on
+  windows with nothing in them.
+  `data/processed/training_dataset_train_full.nc` (3.0GB) /
+  `training_dataset_val_full.nc` (596MB) — promoted to the canonical
+  filenames (v1's are archived, see above).
+- **Class balance improved substantially, as intended**: 3,208/5,078
+  train maps (**63.2%**, up from v1's 46%) and 631/980 val maps
+  (**64.4%**, up from 48%) are active. Per-cell positive rate ~2.13e-04
+  in both splits (train 12,090/56,761,884; val 2,327/10,954,440),
+  consistent between splits. Zero NaNs, zero degenerate all-zero
+  fields.
+- **Not yet done**: retraining `TornadoCNN` on this dataset and
+  re-running the generalization evaluation that flagged v1's smaller
+  25-date scale-up as insufficient (see "First scale-up" above) — this
+  build only produces the dataset; `scripts/train_model.py --val-dataset ...`
+  against it is the natural next step, not performed automatically
+  here.
+
 ### Validation against a documented case
 
 `scripts/validate_documented_case.py` spot-checks the grid/time-bin/
@@ -602,12 +689,17 @@ feature extraction, labeling, the class-imbalance training utilities, a
 baseline CNN architecture, a first end-to-end training run,
 inference/visualization, a prediction-vs-detection case study notebook,
 a resolved, verified training-period decision (~Sept 2014 – Sept 2025),
-a leakage-safe train/val split, and a first stratified scale-up (44
-train / 6 val samples across 25 dates, with real quiet-day negatives
-for the first time) are all in place. The scale-up's own held-out
-validation results are the clearest signal yet of what's still needed:
-significantly more training data before generalization is real.
-Scaling further toward the full training period is the next step.
+a leakage-safe train/val split, a first stratified scale-up (44 train /
+6 val samples across 25 dates), a data-exploration notebook
+(`notebooks/data_exploration.ipynb`) that surfaced a real gap in the
+first full-scale build's run-selection design, and now the
+**corrected full-scale dataset build (v2)** (5,078 train / 980 val
+samples, 63-64% active maps, 95.5% pull success after retries) are all
+in place. The smaller scale-up's held-out validation results were the
+clearest signal yet of what was still needed: significantly more
+training data before generalization is real. That data now exists —
+**retraining and re-evaluating generalization on the full-scale
+dataset is the next step**, not yet done.
 
 - SPC tornado reports (2014–2025) downloaded and parsed to
   `data/processed/spc_tornado_reports_2014_2025.csv` (15,294 reports),
@@ -629,12 +721,18 @@ Scaling further toward the full training period is the next step.
   unique positives).
 - A consolidated (sample, row, col) training dataset pipeline combining
   features + labels is working end-to-end (see above):
-  `src/tornado_predictor/dataset.py`. Two builds exist: the original
-  6-sample single-outbreak pilot (`training_dataset_pilot.nc`) and a
-  first stratified scale-up (44 train / 6 val across 25 dates,
-  `training_dataset_train_scaled.nc`/`training_dataset_val_scaled.nc`).
-  Not yet scaled to the full training period, and not yet aggregating
-  full bins (single representative fxx per bin only).
+  `src/tornado_predictor/dataset.py`. Three builds exist: the original
+  6-sample single-outbreak pilot (`training_dataset_pilot.nc`), a first
+  stratified scale-up (44 train / 6 val across 25 dates,
+  `training_dataset_train_scaled.nc`/`training_dataset_val_scaled.nc`),
+  and now the corrected full-scale build v2 (5,078 train / 980 val
+  across a report-covering set of runs, 2014–2025 — see "Full-scale
+  build v2" above —
+  `training_dataset_train_full.nc`/`training_dataset_val_full.nc`; the
+  earlier v1 build is archived as
+  `training_dataset_{train,val}_full_v1_superseded.nc`). Not yet
+  aggregating full bins (single representative fxx per bin only) —
+  this remains true at every scale built so far.
 - The class-imbalance training utilities (focal loss, dataset wrapper,
   quiet-map downsampler) are implemented and tested (see above):
   `src/tornado_predictor/training.py`. `torch` is now a dependency.
