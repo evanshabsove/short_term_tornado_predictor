@@ -81,6 +81,36 @@ def test_dense_grid_dataset_shapes_and_active_flag(tmp_path):
     assert not np.isnan(y).any()
 
 
+def test_dense_grid_dataset_imputes_nan_features_to_zero(tmp_path):
+    """0-2km/0-3km updraft helicity are NaN for runs before 2018-07-13
+    (see features.py's module docstring) -- DenseGridDataset must
+    impute these to 0.0 rather than propagating NaN into the model
+    (which would silently poison loss/gradients). A no-op for every
+    dataset without this gap, per test_dense_grid_dataset_shapes_and_active_flag
+    above already confirming zero NaN for a normal dataset."""
+    row, col = 5, 6
+    ds = xr.Dataset(
+        data_vars={
+            "cape_mean": (("sample", "row", "col"), np.ones((3, row, col), dtype="float32")),
+            "uh_0_2km_mean": (("sample", "row", "col"), np.full((3, row, col), np.nan, dtype="float32")),
+            "uh_layers_available": (("sample", "row", "col"), np.zeros((3, row, col), dtype="float32")),
+            "label": (("sample", "row", "col"), np.zeros((3, row, col), dtype=np.int8)),
+        },
+        coords={"sample": np.arange(3), "row": np.arange(row), "col": np.arange(col)},
+    )
+    path = tmp_path / "nan_synthetic.nc"
+    ds.to_netcdf(path)
+
+    dataset = DenseGridDataset(str(path))
+    X, _ = dataset[0]
+
+    assert not np.isnan(X).any()
+    uh_channel = dataset.feature_names.index("uh_0_2km_mean")
+    assert (X[uh_channel] == 0.0).all()
+    cape_channel = dataset.feature_names.index("cape_mean")
+    assert (X[cape_channel] == 1.0).all()  # untouched, real data unaffected by the imputation
+
+
 def test_dense_grid_dataset_against_real_pilot_dataset():
     if not PILOT_DATASET_PATH.exists():
         pytest.skip("pilot dataset not present")

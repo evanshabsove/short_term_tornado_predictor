@@ -61,7 +61,7 @@ from herbie import Herbie
 
 from tornado_predictor.dataset import build_dataset
 from tornado_predictor.grid import HrrrCoarseGrid
-from tornado_predictor.split import split_run_bins
+from tornado_predictor.split import split_run_bins, split_run_bins_3way
 from tornado_predictor.time_bins import N_BINS
 
 ARCHIVE_START = pd.Timestamp("2014-09-01")  # verified live: CAPE/CIN/HLCY/shear are absent
@@ -225,3 +225,52 @@ def finalize(
     n_train = combine(train_run_bins, out_train)
     n_val = combine(val_run_bins, out_val)
     return {"n_train": n_train, "n_val": n_val, "n_dropped": len(run_bins) - len(train_run_bins) - len(val_run_bins)}
+
+
+def finalize_3way(
+    staging_dir: Path,
+    completed_runs: list[pd.Timestamp],
+    out_train: Path,
+    out_test: Path,
+    out_val: Path,
+    buffer_hours: float = 24.0,
+) -> dict:
+    """Same combine-from-staging pattern as finalize(), but produces a
+    genuine held-out train/test/val split via split.split_run_bins_3way
+    instead of the 2-way split.split_run_bins -- added alongside
+    finalize() (not replacing it) so every existing caller keeps
+    working unchanged. staging_dir is not hardcoded to any particular
+    build, so this works against data/interim/scaled_build_v2/ today
+    and scaled_build_v3/ once available, with no code changes."""
+    run_bins = [(init_time, bin_index) for init_time in completed_runs for bin_index in range(N_BINS)]
+    train_run_bins, test_run_bins, val_run_bins = split_run_bins_3way(run_bins, buffer_hours=buffer_hours)
+
+    def combine(run_bins_subset, out_path):
+        if not run_bins_subset:
+            return 0
+        per_run = {}
+        datasets = []
+        for init_time, bin_index in run_bins_subset:
+            if init_time not in per_run:
+                per_run[init_time] = xr.open_dataset(run_staging_path(staging_dir, init_time))
+            datasets.append(per_run[init_time].isel(sample=[bin_index]))
+        combined = xr.concat(datasets, dim="sample")
+        combined = combined.assign_coords(
+            init_time=("sample", [i for i, _ in run_bins_subset]),
+            bin_index=("sample", [b for _, b in run_bins_subset]),
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_netcdf(out_path)
+        for ds in per_run.values():
+            ds.close()
+        return combined.sizes["sample"]
+
+    n_train = combine(train_run_bins, out_train)
+    n_test = combine(test_run_bins, out_test)
+    n_val = combine(val_run_bins, out_val)
+    return {
+        "n_train": n_train,
+        "n_test": n_test,
+        "n_val": n_val,
+        "n_dropped": len(run_bins) - len(train_run_bins) - len(test_run_bins) - len(val_run_bins),
+    }

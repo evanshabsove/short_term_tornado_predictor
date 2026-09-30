@@ -412,6 +412,563 @@ split as one unit, unchanged from before.
   against it is the natural next step, not performed automatically
   here.
 
+### Full-scale training run (first statistically real generalization result)
+
+`scripts/train_model.py --dataset training_dataset_train_full.nc
+--val-dataset training_dataset_val_full.nc --epochs 50` against the
+full-scale v2 dataset, default hyperparameters (`alpha=0.25`,
+`gamma=2.0`, `quiet_keep_fraction=0.2`, `lr=1e-3`, `batch_size=2`,
+`seed=0`). Took ~13 minutes on a MacBook (CPU only — verified this is
+plenty; see chat history, no GPU/cloud needed at this model/data
+scale). Checkpoint: `models/tornado_cnn_full.pt`.
+
+- **Loss**: 0.0011 -> 0.0002 (train), 0.0002 -> 0.0001 (val), both
+  converged by ~epoch 5 and flat afterward. Low absolute loss is
+  expected from the per-cell class imbalance alone (per "Class
+  imbalance strategy" below) and is **not** by itself evidence of good
+  discrimination — same caveat as every earlier training run in this
+  project.
+- **The real result is the held-out separation, measured properly for
+  the first time.** The first scale-up's val set had only 6 samples (3
+  active) — too few for a real distribution. This dataset's val set
+  has **631 active samples**, giving an actual statistical picture:
+  pooled across all 980 val samples (2,327 positive cells vs.
+  10,952,113 negative cells), mean positive-cell probability 0.1195 vs.
+  mean negative-cell probability 0.0078 — a **15.3x pooled separation**,
+  and a probability-space Cohen's d of **2.49**. That's *stronger* than
+  any single raw feature's Cohen's d from the data-exploration notebook
+  (0.9-1.4) — the model has learned a nonlinear combination of the 14
+  input fields that discriminates better than any one field alone, a
+  genuine sign it learned something real, not noise.
+- **Per-sample view**: among the 631 active val samples, separation
+  ratio (mean positive proba / mean negative proba) has median 12.5x
+  (p5=2.2x, p95=32.5x) — weaker than the training-set-only pilot's
+  claimed ~40-90x (expected: that was memorization, this is genuine
+  held-out data), but a real, usable signal. Only **16/631 (2.5%)**
+  samples are outright misses (weakest true positive cell scored below
+  the sample's mean negative-cell probability) — most active val
+  samples show clear separation.
+- **Absolute confidence is still modest** (mean positive-cell proba
+  ~0.12, nowhere near 1.0) — same `FocalLoss` `alpha=0.25` explanation
+  flagged throughout this project, now with much stronger evidence
+  behind it: the underlying features and the model's own learned
+  probabilities both show large effect sizes, so the low absolute
+  confidence is a loss-function calibration choice, not a sign the
+  model failed to learn. Retuning `alpha` was the concrete next lever
+  — see "Alpha sweep" below (which also corrects the direction this
+  note originally guessed).
+- **Conclusion**: the full-scale dataset resolved the earlier "44
+  samples isn't enough" finding — this is now a real, reproducible,
+  statistically meaningful generalization result, not a mechanics
+  check. The architecture itself (3-layer, ~270km receptive field, 32
+  channels, 22,593 parameters — tiny next to TorNet's ~8M-parameter
+  VGG-style baseline) remains the acknowledged next limitation, not
+  yet addressed.
+
+### Alpha sweep (resolved — corrects earlier "lower alpha" guidance)
+
+`scripts/sweep_alpha.py` trains 5 identical `TornadoCNN` runs on the
+full-scale dataset (same data, architecture, epochs=50, seed=0),
+varying only `FocalLoss`'s `alpha`: 0.1, 0.25 (prior default), 0.5,
+0.75, 0.9. Analyzed in `notebooks/alpha_sweep_results.ipynb`.
+
+- **The prior guidance was backwards, now corrected.** Earlier text in
+  this file and in `training.FocalLoss`'s own docstring claimed modest
+  positive-cell confidence would need "a lower alpha" to fix. Rereading
+  the actual formula (`alpha_t = alpha` for the positive class, `1 -
+  alpha` for negative) suggested the opposite — a *higher* alpha gives
+  the rare positive class *more* weight, not less — and the sweep
+  confirms it empirically: `mean_proba_positive` rose monotonically
+  with alpha (0.082 at 0.1 -> 0.308 at 0.9) across every value tested.
+  `training.py`'s docstring is corrected; this note replaces the old
+  (wrong) one.
+- **Higher alpha measurably improves held-out separation, with a real
+  tradeoff.** `mean_proba_negative` also rises with alpha (0.005 ->
+  0.028) — pushing alpha up isn't free. But on the two more
+  distributionally-robust metrics, higher alpha still wins: Cohen's d
+  climbs from 2.32 (alpha=0.1) to a peak of **3.08 at alpha=0.9**, and
+  miss rate (fraction of active val samples where the weakest true
+  positive cell scores below that sample's own mean negative-cell
+  probability) drops from 3.3% to **1.7%** — both best at alpha=0.9,
+  the highest value tested. Simple mean-ratio metrics (pooled ratio,
+  per-sample median ratio) are noisier and non-monotonic across this
+  sweep — a reminder that they're a weaker signal here than Cohen's d.
+- **alpha=0.9 is the best performer among the 5 values tested, by
+  Cohen's d and miss rate specifically.** Nothing above 0.9 was tried.
+- **Does not touch the architecture** — `TornadoCNN` is identical
+  (22,593 parameters) across all 5 runs; this is a pure loss-function
+  tuning result, independent of the architecture-widening work planned
+  next.
+- Checkpoints: `models/alpha_sweep/tornado_cnn_alpha_<alpha>.pt`.
+  Results: `models/alpha_sweep/results.json`.
+- **This recommendation was superseded almost immediately — see "Model
+  comparison summary" below.** Cohen's d and miss rate are both
+  mean-separation metrics; once threshold-integrated metrics (AUC-PR,
+  best-threshold F1) were computed, they showed the *opposite* ranking
+  — alpha=0.25 (the original default) wins, alpha=0.9 is the *worst*
+  of the 5 by AUC-PR. **The project default `alpha=0.25` was NOT
+  changed, and this sweep's "prefer higher alpha" conclusion should
+  not be acted on** — kept here, uncollapsed, as a real example of two
+  legitimate metrics disagreeing, not deleted or quietly fixed.
+
+### Model comparison summary (standardized metrics, all runs)
+
+`notebooks/model_comparison_summary.ipynb` computes a single
+consistent metric set — accuracy, AUC-ROC, AUC-PR (average precision),
+precision/recall/F1 (at threshold=0.5 and at each model's own
+best-F1 threshold), Cohen's d — across every checkpoint trained so
+far: pilot, first scale-up, split-demo, full-scale v2, and all 5
+alpha-sweep runs. `scikit-learn` (+ `scipy`, its dependency) added to
+`requirements.txt` for this — the first use of standard
+precision/recall/ROC/PR tooling in the project; everything before this
+used hand-rolled mean-probability comparisons.
+
+- **Accuracy is confirmed useless at this imbalance, with real
+  numbers**: every model scores >99.8% (up to 99.98% at full scale) —
+  including, implicitly, an always-predict-negative model, which would
+  score `1 - pos_rate`. Never cite accuracy as evidence of quality in
+  this project.
+- **AUC-ROC is misleadingly high (0.92–0.98) for every model** — a
+  known trap under extreme imbalance (ROC integrates over the huge,
+  easy true-negative population). **AUC-PR (average precision) is the
+  honest metric: only ~0.02–0.03** for every model — still ~100-150x
+  better than the no-skill baseline (the positive rate itself), a real
+  signal, but a much more sober picture than ROC-AUC alone suggests.
+  **Report AUC-PR alongside AUC-ROC from here on.**
+- **`recall_at_0.5` is exactly 0.0000 for every model without
+  exception** — not one prediction across any val set crosses the
+  conventional 0.5 threshold for a real positive cell, even at
+  alpha=0.9 (mean positive-cell probability 0.31). For the full-scale
+  and alpha-sweep models, `precision_at_0.5` is `NaN` — literally zero
+  cells out of ~11 million cross 0.5 at all, positive or negative.
+  Confirms, more starkly than any earlier check, that `FocalLoss`
+  calibration keeps every prediction well under 0.5 regardless of
+  alpha in the tested range — 0.5 is not a usable operating threshold
+  for this model family; each config's own best-F1 threshold (found to
+  range 0.08–0.40) would be required for any real deployment.
+- **The alpha-sweep's "higher alpha wins" conclusion is reversed by
+  AUC-PR/F1** — see "Alpha sweep" above, now corrected there too.
+  Mean-separation metrics (Cohen's d, miss rate) and
+  threshold-integrated metrics (AUC-PR, F1) legitimately disagree here;
+  prefer AUC-PR/F1 going forward, since they better reflect real
+  operating-point usefulness.
+- **Val loss does not predict AUC-PR** — no clean relationship across
+  the 8 models with a val set (loss is also rescaled by
+  `alpha`/`gamma`, so it isn't even comparable across the sweep). Loss
+  curves remain useful for confirming a run trained without
+  instability, but shouldn't be used to judge or compare model
+  quality.
+- **Carries forward into architecture widening**: use AUC-PR (plus a
+  tuned-threshold F1/recall/precision) as the primary comparison
+  metric for any new architecture — not loss, not ROC-AUC alone, not
+  raw probability separation alone. The number a wider architecture
+  needs to beat: **AUC-PR = 0.0283** (full-scale v2, alpha=0.25 — still
+  the best config found to date).
+- **The metric logic above is now a tested library module**, not just
+  notebook code: `src/tornado_predictor/evaluate.py`
+  (`get_proba_labels`, `compute_metrics`, `evaluate_model`,
+  `evaluate_checkpoint`) + `scripts/evaluate_model.py` (CLI, prints a
+  summary and can save full metrics as JSON via `--out`). Architecture
+  ticket 1 of the widening plan — every future architecture variant
+  (tickets 2-5) should call this instead of re-deriving the metric
+  computation. Verified to reproduce the comparison notebook's exact
+  numbers bit-for-bit (`python scripts/evaluate_model.py` against the
+  default full-scale/alpha=0.25 config prints AUC-ROC=0.9819,
+  AUC-PR=0.0283, matching above precisely). `scikit-learn`'s
+  `roc_auc_score`/`average_precision_score`/`precision_recall_curve`/
+  `roc_curve` do the underlying computation; a zero-positives or
+  zero-negatives `y_true` returns `nan` for the AUC fields instead of
+  raising (`sklearn` itself raises `ValueError` on a single-class
+  input) — same convention `inference.sanity_check_against_labels`
+  already used. **`notebooks/model_comparison_summary.ipynb` and
+  `scripts/sweep_alpha.py` were NOT retrofitted to call this module** —
+  they keep their own inline copies of the same logic; only future work
+  uses the extracted version.
+
+### Architecture widening, ticket 2: width vs. depth ablation
+
+`TornadoCNN` (`model.py`) generalized to accept `n_hidden_layers`
+(default 3, exactly reproducing the original hardcoded architecture —
+verified bit-identical against `tornado_cnn_full.pt`'s real predictions
+before/after the change, so every existing checkpoint still loads
+correctly with no migration). Added `receptive_field_cells(n)` =
+`1 + 2*n`. `scripts/sweep_architecture.py` trained 4 new
+(`hidden_channels`, `n_hidden_layers`) configs on the full-scale v2
+dataset, all other hyperparameters fixed at the established best
+config (`alpha=0.25`, 50 epochs, seed=0), and re-evaluated the existing
+baseline via `evaluate.evaluate_checkpoint` (not retrained) as the
+comparison point. Results in `models/architecture_sweep/results.json`.
+
+| config | params | receptive field | AUC-PR | AUC-ROC | Cohen's d | train/val loss |
+|---|---|---|---|---|---|---|
+| baseline (32ch, 3L) | 22,593 | 7x7 | 0.0283 | 0.9819 | 2.49 | 0.00016 / 0.00012 |
+| 64ch, 3L | 82,049 | 7x7 | 0.0265 | 0.9828 | 2.34 | 0.00016 / 0.00013 |
+| 128ch, 3L | 311,553 | 7x7 | 0.0257 | 0.9831 | 2.67 | 0.00017 / 0.00012 |
+| **32ch, 5L** | 41,089 | 11x11 | **0.0319** | 0.9766 | 2.45 | 0.00016 / 0.00013 |
+| 128ch, 5L | 606,721 | 11x11 | 0.0256 | 0.9653 | 1.28 | 0.00016 / **0.00029** |
+
+- **A real, if modest, improvement — and it confirms the receptive-field
+  hypothesis, not the "more capacity" one.** The *only* config that beat
+  the baseline's AUC-PR is **32 channels / 5 layers (0.0319, +12.7% over
+  0.0283)** — the cheapest of the 4 new variants (41K params, ~1.8x
+  baseline) and the one that isolates *more receptive field* (11x11
+  cells, ~430km) without adding channel width. This is exactly the
+  mechanism argued for when this ticket was planned: tornadic
+  environments are organized at meso/synoptic scales the original 7x7
+  window couldn't see.
+- **Widening channels alone did not help** — both 64ch/3L and 128ch/3L
+  scored *below* the baseline on AUC-PR (0.0265, 0.0257) despite 3.6x
+  and 13.8x more parameters. More per-cell representational capacity,
+  without more spatial context, isn't the bottleneck.
+- **Combining both axes (128ch, 5L) was the worst of all 5 configs**,
+  and shows real overfitting: it's the only config where val loss
+  (0.00029) is meaningfully *higher* than train loss (0.00016) — every
+  other config has them roughly equal. 607K parameters (~27x baseline)
+  on a 5,078-sample training set is a lot of capacity, and Cohen's d
+  (1.28, vs. 2.3-2.7 everywhere else) and AUC-ROC (0.9653, notably
+  below the 0.976-0.983 range elsewhere) confirm it's the clear outlier
+  in the wrong direction.
+- **Caveat, stated when this ticket was planned and still true**: this
+  is a 5-point targeted ablation at one fixed hyperparameter recipe
+  (the baseline's `alpha`/`lr`/`epochs`), not an exhaustive search, and
+  no per-architecture hyperparameter retuning was attempted. The 32ch/5L
+  win is real evidence for the receptive-field direction, not proof
+  it's the ceiling — a next step (not done here) could retune
+  hyperparameters specifically for a depth-only widening direction, or
+  test more depth values (6, 7 layers) before moving to dilated convs.
+- Observed wall-clock scaled sub-linearly with parameter count (e.g.
+  128ch/3L's 311K params took ~51min, far less than the ~3hr a naive
+  linear extrapolation from the 128ch/5L timing test predicted) —
+  widening channels parallelizes well on CPU (larger matrix
+  multiplies), while adding depth is more sequential; worth remembering
+  when estimating cost for tickets 3-4.
+- Checkpoints: `models/architecture_sweep/tornado_cnn_h<hidden>_l<layers>.pt`.
+
+### Architecture widening, ticket 3: dilated convolutions (new best result)
+
+`TornadoCNN` generalized again (same in-place precedent as ticket 2) to
+accept `dilations: list[int] | None` — each hidden layer becomes
+`Conv2d(..., padding=dilation, dilation=dilation)`, preserving spatial
+size at any dilation rate. `None` (default) -> `[1] * n_hidden_layers`,
+exactly reproducing prior behavior — verified bit-identical against
+both the original baseline and ticket 2's winner's real predictions
+before/after the change. `receptive_field_cells` generalized to
+`1 + 2*sum(dilations)`. Channel width fixed at 32 throughout (ticket
+2's best/cheapest width) to isolate the dilation effect.
+`scripts/sweep_dilation.py` mirrors ticket 2's sweep script pattern.
+
+**A real bug was caught and fixed while writing this ticket's tests,
+worth recording**: the standard way to empirically verify a CNN's
+receptive field is backprop-from-one-output-pixel-through-a-zero-input
+and check which input pixels got nonzero gradient. This is a trap —
+with an all-zero input, every conv's pre-activation is spatially
+*constant* (bias only, since input contributes nothing anywhere), so a
+ReLU can go uniformly dead across the *entire* feature map purely by
+chance on the bias's sign, silently collapsing the measured field to
+nothing. Fixed by using random input instead (verified reliable across
+5 seeds, `hidden_channels=32` so the chance of every channel being
+simultaneously dead at one exact position is astronomically small).
+Documented in the test itself
+(`test_receptive_field_formula_matches_gradient_based_measurement`) so
+it isn't silently rediscovered later.
+
+**Cost estimate was wrong, corrected empirically**: the plan predicted
+~32 min total for both new configs (reasoning: dilation doesn't change
+FLOP count vs. a plain conv of the same kernel/channel size). Real
+measurement: ~76 min (31min + 45min). Dilated convs have real CPU
+overhead beyond raw FLOP count on this hardware, likely from less
+cache-friendly strided/dilated memory access patterns — still cheap
+enough to just run, but the "same FLOPs = same wall-clock" assumption
+doesn't hold on CPU.
+
+| config | params | receptive field | AUC-PR | AUC-ROC | Cohen's d | train/val loss |
+|---|---|---|---|---|---|---|
+| baseline (32ch, 3L, no dilation) | 22,593 | 7x7/273km | 0.0283 | 0.9819 | 2.49 | 0.00016 / 0.00012 |
+| ticket 2 winner (32ch, 5L, no dilation) | 41,089 | 11x11/429km | 0.0319 | 0.9766 | 2.45 | 0.00016 / 0.00013 |
+| 32ch, dilations=[1,2,4] | 22,593 | 15x15/585km | 0.0289 | 0.9823 | 2.32 | 0.00016 / 0.00013 |
+| **32ch, dilations=[1,2,4,8]** | 31,841 | 31x31/1209km | **0.0322** | **0.9861** | 2.33 | 0.00016 / 0.00012 |
+
+- **New best result across both architecture tickets: `dilations=[1,2,4,8]` (AUC-PR 0.0322, AUC-ROC 0.9861, best-F1 0.0883)**
+  — beats ticket 2's winner on every metric, with **fewer parameters
+  (31,841 vs. 41,089, ~22% fewer) and fewer layers (4 vs. 5)**. This is
+  the clearest evidence yet that receptive field, not raw parameter
+  count, is what this problem needs — dilation grows it far more
+  cheaply than stacking more full layers did.
+- **`[1,2,4]` (same 3 layers as the original baseline, zero extra
+  parameters) already beats the baseline** (0.0289 vs. 0.0283) — a
+  free improvement from dilation alone at identical parameter count.
+  It does *not* reach ticket 2's winner, though — matching ticket 2's
+  ~430km depth-widening benefit needed the bigger `[1,2,4,8]` schedule
+  (~1209km), not just any dilation.
+- **No overfitting signature at the biggest receptive field this
+  time** — unlike ticket 2's 128ch/5L (which combined more parameters
+  *and* more depth and overfit badly, val loss almost 2x train loss),
+  `[1,2,4,8]`'s val loss (0.00012) is actually slightly *below* train
+  loss (0.00016), the same healthy pattern as every other config here.
+  Supports the emerging picture: parameter growth (ticket 2's channel
+  widening, and combining width+depth) is what caused overfitting risk
+  before, not receptive-field growth by itself — dilation decouples the
+  two, growing spatial context without growing capacity nearly as much.
+- **Caveat carried over from planning**: the known "gridding artifact"
+  risk of naive stacked dilation schedules (`[1,2,4,8]`) wasn't
+  engineered around (e.g. hybrid dilation scheduling) — the results
+  here don't show obvious signs of it, but a more careful schedule is a
+  candidate future refinement if this direction is pursued further, not
+  ruled out or confirmed necessary by this ticket alone.
+- Checkpoints: `models/dilation_sweep/tornado_cnn_d<dilations-joined-by-dash>.pt`.
+
+### Architecture widening, ticket 4: a real U-Net (new best result)
+
+`src/tornado_predictor/unet.py` — `TornadoUNet`, a standard 3-downsample-
+stage U-Net (4 resolution levels, matching TorNet's own 4-block
+backbone shape): `ConvBlock` = two `(Conv3x3, ReLU)` pairs per level,
+`MaxPool2d(2)` downsampling, bilinear `Upsample` + `Conv1x1`
+channel-reduce + skip-concat for the decoder (avoids the
+checkerboard-artifact failure mode of `ConvTranspose2d`). Channels:
+14→16→32→64→128 (bottleneck) →64→32→16→1 — deliberately conservative
+width (`base_channels=16`, not TorNet's 64) given ticket 2's
+overfitting lesson at high parameter counts.
+
+**Non-power-of-2 grid, resolved with pad-once/crop-once**: the 81x138
+grid needs H,W divisible by 8 for 3 clean downsample stages. Pads to
+88x144 (`F.pad(x, (0, 6, 0, 7))`, right/bottom only, so the real region
+sits in the padded canvas's top-left corner) and crops the output back
+to `[:81, :138]` — no per-block offset bookkeeping needed, unlike the
+asymmetric-padding alternative the ticket considered and rejected.
+Downsample sequence is exact with no further rounding: 88x144 → 44x72
+→ 22x36 → 11x18 (bottleneck).
+
+**`inference.load_checkpoint` now dispatches via a small model
+registry** (`MODEL_REGISTRY = {"TornadoCNN": ..., "TornadoUNet": ...}`)
+keyed by each checkpoint's own `model_class` field — self-describing
+checkpoints, consistent with this project's stated design principle
+(see "Training loop" above). Every checkpoint saved before this ticket
+has no `model_class` key and defaults to `"TornadoCNN"`, reconstructing
+exactly as before — verified bit-identical against a real checkpoint's
+predictions. **No changes were needed to `training.py` or
+`evaluate.py`** — both already operated generically on any `nn.Module`,
+the direct payoff of ticket 1 being built architecture-agnostic from
+the start.
+
+**A real bug was caught writing the U-Net's tests**: none needed —
+worth noting the *lack* of one, since U-Net skip-connection wiring has
+many more ways to accidentally leave a branch disconnected than a flat
+conv stack; the gradient-flow-through-every-parameter test (same
+pattern as `test_model.py`) passed cleanly on the first real run.
+
+Single training run (not a sweep — this ticket built and trained one
+config, not an ablation, matching its starter prompt): `alpha=0.25`,
+50 epochs, seed=0, same recipe as every prior ticket. 451,361
+parameters (measured, not estimated).
+
+| config | params | AUC-PR | AUC-ROC | Cohen's d | train/val loss |
+|---|---|---|---|---|---|
+| original baseline | 22,593 | 0.0283 | 0.9819 | 2.49 | — |
+| ticket 2 winner (32ch, 5L) | 41,089 | 0.0319 | 0.9766 | 2.45 | — |
+| ticket 3 winner (dilated [1,2,4,8]) | 31,841 | 0.0322 | 0.9861 | 2.33 | 0.00016 / 0.00012 |
+| **U-Net (base_channels=16)** | 451,361 | **0.0387** | **0.9882** | 2.30 | 0.00015 / **0.00012** |
+
+- **New best result overall: AUC-PR 0.0387** — a +20.2% relative
+  improvement over ticket 3's dilated winner (0.0322) and +36.7% over
+  the original baseline (0.0283). Best-F1 (0.0960) and AUC-ROC (0.9882)
+  are also both the best of any config across all three architecture
+  tickets.
+- **No overfitting signature, despite ~14x more parameters than the
+  previous best** — val loss (0.00012) is essentially equal to (very
+  slightly below) train loss (0.00015), the same healthy pattern every
+  non-overfit config has shown. This is a genuinely interesting result
+  on its own: ticket 2 showed raw parameter count *can* cause
+  overfitting (607K params, flat architecture, val loss ~2x train
+  loss), but this 451K-parameter U-Net shows no such symptom. Parameter
+  count alone doesn't determine overfitting risk — the U-Net's
+  multi-scale downsample/upsample structure (a strong architectural
+  prior for spatial data, forcing the network to represent information
+  at multiple scales rather than memorizing at full resolution
+  everywhere) appears to have real regularizing value beyond just
+  "more capacity, more overfitting risk."
+- Checkpoint: `models/unet/tornado_unet.pt`. Results:
+  `models/unet/results.json`.
+- Not attempted in this ticket (out of scope, per plan): sweeping
+  `base_channels` or downsample depth — this ticket built and trained
+  exactly one deliberately-conservative config; a wider or deeper
+  U-Net might do even better, or might start overfitting the way
+  ticket 2's widening did. Open question for a future ticket.
+
+### Architecture widening, ticket 5: full comparison (concludes this round)
+
+`notebooks/architecture_comparison.ipynb` — consolidates all 3 sweep
+results files (`architecture_sweep`, `dilation_sweep`, `unet`) into one
+comparison, deduplicating reference checkpoints re-evaluated more than
+once across files (by `checkpoint` path — verified identical metrics
+across duplicates, as expected from re-evaluating the same file). 8
+unique real models total.
+
+- **Confirms the U-Net as the outright winner** across every metric
+  shown (AUC-PR 0.0387, AUC-ROC 0.9882, best-F1 0.0960) — see ticket 4
+  above for the full table.
+- **Quantifies the overfitting finding precisely**: val-loss/train-loss
+  ratio is 0.72–0.83 for every config *except* ticket 2's `128ch/5L`,
+  which sits at **1.80** — a stark, isolated outlier, not a fuzzy
+  judgment call.
+- **No clean "bigger is better" relationship between parameter count
+  and AUC-PR** — ticket 2's widest configs (`128ch/3L`, `128ch/5L`)
+  score *below* several far smaller models; the U-Net is both the
+  largest model tried and the best, but the very next-best (`dilated
+  [1,2,4,8]`) is one of the smallest. What mattered was growing
+  receptive field, not raw capacity.
+- **Honest caveats stated directly in the notebook, not buried**: all
+  8 models share one hyperparameter recipe never tuned per-architecture
+  (the U-Net's real ceiling is unknown); the U-Net itself was one
+  config, not swept; and absolute AUC-PR (0.0387) is still low in
+  absolute terms — a real ~190-260x improvement over the no-skill
+  baseline, but this remains a hard, unsolved problem, not a finished
+  one.
+- This concludes the architecture-widening round (tickets 1-5). The
+  U-Net (`models/unet/tornado_unet.pt`) is now this project's
+  best-performing checkpoint and the natural default choice for any
+  future work building on it.
+
+### Genuine held-out test set (Tier 1 roadmap, ticket 2)
+
+Every AUC-PR reported through ticket 5 (including the U-Net's 0.0387)
+came from `training_dataset_val_full.nc` — a set checked repeatedly
+across 5 architecture-selection rounds. `split.py` gained
+`assign_date_split_3way`/`split_run_bins_3way`/`report_split_balance_3way`
+(added alongside the existing 2-way functions, not replacing them —
+nothing in tickets 1-5 needed to change), and `build_scaled.py` gained
+`finalize_3way`, to build a genuine third bucket: **train (day-of-year
+mod 20: 0-13, 70%) / test (14-16, 15%, new) / val (17-19, 15%)**. val's
+*date-assignment rule* is unchanged from the 2-way split (mod 17-19,
+same as always); test is carved from what the 2-way split called
+train — days never touched by any past architecture decision, since
+train was only ever used for gradient updates. No new HRRR pulls
+needed — built entirely from the existing v2 staged runs via
+`scripts/build_3way_split.py`, output to clearly-distinct
+`training_dataset_{train,test,val}_3way.nc` files (the canonical
+`_full.nc` files tickets 1-5 depend on are untouched).
+
+- **A real inconsistency in the plan was caught by the actual numbers,
+  not assumed away.** The plan claimed val's composition would stay
+  "unchanged" — true for the *date-assignment rule* (verified exactly:
+  with `buffer_hours=0`, the 3-way val is byte-identical to the 2-way
+  val, both 980 samples) but **false once the buffer safeguard is
+  applied**: protecting test from indirect val-leakage (dropping any
+  val sample within 24h of a test sample) removes 182 of those 980
+  val samples (18.6%), leaving **798**. User chose the more rigorous
+  option: keep the buffer drop, and re-evaluate the U-Net on the new,
+  smaller val too, rather than silently weakening test's protection to
+  preserve exact historical comparability.
+- **Real split sizes** (3,183 completed v2 runs, buffer_hours=24):
+  train 4,174 / test 922 / val 798 / dropped 472 (7.4%, vs. the 2-way
+  split's 6.5% — expected, there are now two boundaries needing buffer
+  protection instead of one). Positive rate is consistent across all
+  three (train 63.2%, test 62.6%, val 62.9% active maps) — no
+  accidental imbalance.
+- **U-Net evaluated on all three, via the identical `evaluate.py` code
+  path**:
+
+  | split | samples | AUC-PR | AUC-ROC | Cohen's d |
+  |---|---|---|---|---|
+  | val (new, 798) | 798 | 0.0398 | 0.9880 | 2.27 |
+  | val (old, 980, for reference) | 980 | 0.0387 | — | — |
+  | **test (new, 922, never touched before)** | 922 | **0.0836** | 0.9924 | 2.59 |
+
+- **The new val's AUC-PR (0.0398) is reassuringly close to the old
+  val's (0.0387, +2.8%)** — removing the 182 test-adjacent samples
+  didn't meaningfully change the number, a good sign the buffer-drop
+  isn't introducing some weird bias.
+- **The genuinely new, never-touched test set scores notably
+  *higher*** (0.0836, more than double val's ~0.04) — not a leakage
+  red flag (leakage would show up as test scoring *worse* than a val
+  set the architecture search implicitly fit to; scoring *better* on
+  fresh data is the reassuring direction). Checked whether this is a
+  trivial composition artifact before taking the number at face value:
+  active-map rate (62.6% test vs. 62.9% val) and per-cell positive
+  rate (2.01e-04 vs. 2.06e-04) are both nearly identical between the
+  two splits — so the gap isn't explained by one split being an
+  obviously easier class-balance mix. **The honest conclusion: at this
+  project's current scale (~2,344 total dates, split 3 ways by a
+  deterministic day-of-year rule), which specific storms land in which
+  partition carries real variance** — a single train/val/test split
+  can swing AUC-PR by 2x depending on date luck, not just model
+  quality. This is itself a genuine, useful finding, not noise to
+  explain away: it's direct evidence that year-based cross-validation
+  (already flagged as a Tier 3 roadmap item) would give a much more
+  trustworthy performance estimate than any single split, including
+  this new one.
+- **Not done in this ticket** (explicitly out of scope, per the plan):
+  whether to promote the new, smaller (70%) train as canonical for
+  future training — a separate decision, not folded in silently. No
+  model has been retrained on the new train split; only the
+  already-trained U-Net was evaluated against the new val/test.
+
+### Gradient-boosted trees (Tier 1 roadmap, ticket 3) — CNN family wins, decisively
+
+Literature found an HGBT beat a U-Net on a closely analogous CAM-grid
+task — this ticket tested whether that holds here too.
+`src/tornado_predictor/gbt.py` (`flatten_for_gbt`,
+`downsample_negative_cells`) + `scripts/train_gbt.py` trained
+`sklearn.ensemble.HistGradientBoostingClassifier` on
+`training_dataset_train_3way.nc` flattened to one row per grid cell,
+keeping every positive cell and downsampling negatives to 20:1 (9,992
+positive + 199,840 negative = 209,832 rows, vs. 46.66M total — per-cell
+downsampling a spatial CNN structurally can't do, see "Class imbalance
+strategy" above). Evaluated on val and test, full/non-downsampled, via
+the same `evaluate.compute_metrics` code path as every CNN variant.
+Fit took **1.9 seconds** (HGBT's whole design point is scaling past
+this dataset's size easily).
+
+| model | val AUC-PR | test AUC-PR | val Cohen's d | test Cohen's d |
+|---|---|---|---|---|
+| U-Net (ticket 4/5) | 0.0398 | **0.0836** | 2.27 | 2.59 |
+| **GBT (this ticket)** | 0.0186 | **0.0290** | **3.86** | **4.04** |
+
+- **The literature's finding did not replicate here — the U-Net beats
+  GBT by 2.1x (val) to 2.9x (test), decisively, not a close call.**
+  Reported exactly as found, not spun: this is a real, useful answer to
+  "should this project keep chasing bigger CNNs" — yes, for now.
+- **Best-supported explanation, consistent with this project's own
+  throughline**: every architecture-widening ticket (2-4) found that
+  *receptive field* — seeing neighboring cells, not just more
+  per-cell capacity — is what drove real improvement. A per-cell GBT
+  has **zero** receptive field by construction: each grid cell is an
+  i.i.d. tabular row with no access to its neighbors at all. The
+  literature's own HGBT success likely came from richer, already
+  spatially-aware engineered predictors (Sobash et al. 2020 used 174
+  engineered predictors, not 14 raw pooled fields) and/or
+  neighborhood-radius label matching — this project's GBT had neither.
+- **A second, independent confirmation that Cohen's d and AUC-PR can
+  sharply disagree** (first found comparing alpha-sweep configs, see
+  "Model comparison summary" above) — this time *across model
+  families*: GBT's Cohen's d (3.86-4.04) is actually *larger* than the
+  U-Net's (2.27-2.59), and its mean positive-cell probability is far
+  higher (~0.88 vs. the U-Net's much more modest, better-calibrated
+  confidence) — yet its AUC-PR is far worse. GBT is confident and
+  well-separated *on average*, but ranks enough of the ~9-10 million
+  negative cells above true positives somewhere in the distribution's
+  tail to hurt precision badly at any real operating point — exactly
+  the failure mode a per-cell model with no spatial disambiguation
+  would be expected to have (an isolated favorable-looking cell
+  surrounded by unfavorable neighbors scores high but is often a false
+  alarm; the U-Net can tell the difference, GBT structurally cannot).
+- **Feature importance (permutation, on val) validates the literature's
+  CAPE+shear+helicity emphasis**: `cape_mean`, `srh_0_3km_max`,
+  `cape_max`, and `shear_0_6km_max` are the top 4 of 14, `cin_mean` is
+  dead last — consistent with the STP-style severe-weather literature
+  and with this project's own earlier Cohen's d findings (data
+  exploration notebook: CIN was the weakest single-feature
+  discriminator there too).
+- **Two concrete, well-motivated follow-ups, not done here**: (1)
+  engineer neighborhood-aware features for GBT (e.g. a 3x3-cell local
+  average/spread per field) to give it *some* spatial context without
+  building a full CNN — would directly test whether the gap is really
+  about receptive field or something else; (2) re-run once ticket 1's
+  UH-enriched dataset is ready — updraft helicity was the literature's
+  single most-cited tornado surrogate and wasn't available for this
+  run.
+- Model: `models/gbt/tornado_gbt.joblib`. Results:
+  `models/gbt/results.json`.
+
 ### Validation against a documented case
 
 `scripts/validate_documented_case.py` spot-checks the grid/time-bin/
@@ -568,12 +1125,13 @@ that sample's known positive labels, via `scripts/run_inference.py`.
   `FocalLoss` down-weighting the positive class's loss contribution
   (per Lin et al. 2017's own formula) — which matters far more at this
   dataset's per-sample imbalance (7–46 positive cells among 11,178)
-  than at RetinaNet's original object-detection imbalance. Confirms
-  `FocalLoss`'s own docstring note ("expect to need a lower alpha").
-  Don't "fix" this by chasing near-1.0 probabilities without
-  discussing with the user first — it may just need a lower `alpha`,
-  or may be an inherent limit of training on 6 samples with a 3-layer,
-  ~270km-receptive-field model; both are open, not yet investigated.
+  than at RetinaNet's original object-detection imbalance. At the time
+  this was written, `FocalLoss`'s own docstring speculated "a lower
+  alpha" would help — **that guess was backwards** (alpha weights the
+  positive class directly; a *higher* alpha gives it more weight, not
+  less) and has since been corrected with real evidence — see "Alpha
+  sweep" above, which found alpha=0.9 (the highest value tested) gave
+  the best held-out separation of the values tried.
 - **Visualization** (`outputs/inference_pilot.png`, gitignored):
   predicted probability heatmap (viridis, sequential/colorblind-safe)
   with true positive cells marked as a red X, one panel per sample,
@@ -697,9 +1255,55 @@ first full-scale build's run-selection design, and now the
 samples, 63-64% active maps, 95.5% pull success after retries) are all
 in place. The smaller scale-up's held-out validation results were the
 clearest signal yet of what was still needed: significantly more
-training data before generalization is real. That data now exists —
-**retraining and re-evaluating generalization on the full-scale
-dataset is the next step**, not yet done.
+training data before generalization is real. That data now exists, and
+**a full-scale training run confirms it worked**: a real, statistically
+meaningful held-out generalization result (15.3x pooled separation,
+probability-space Cohen's d 2.49 across 980 val samples — see
+"Full-scale training run" above), not just a mechanics check on a
+handful of samples. A 5-value **alpha sweep** (see "Alpha sweep"
+above) corrected a backwards piece of earlier guidance (higher alpha
+raises positive-cell confidence, not lower) and initially favored
+alpha=0.9 by mean-separation metrics — but a follow-up **model
+comparison summary** (see above, standardized AUC-ROC/AUC-PR/F1
+metrics across every checkpoint, `scikit-learn` now a dependency)
+reversed that: AUC-PR and best-threshold F1 both favor the *original*
+alpha=0.25, and also revealed that AUC-ROC is misleadingly high
+(0.92-0.98) at this imbalance while the honest metric, AUC-PR, sits
+around 0.02-0.03 for every model tested — real signal (~100-150x the
+no-skill baseline) but far more modest than ROC-AUC alone suggests.
+**Project default remains alpha=0.25.** Architecture widening: ticket 1
+built a reusable, tested evaluation module (`evaluate.py`); ticket 2's
+width-vs-depth ablation found more receptive field (not more capacity)
+helps, while channels-only widening and combining both axes did not;
+ticket 3's dilated convolutions beat that with fewer parameters and no
+overfitting; ticket 4's U-Net beat both — **AUC-PR 0.0387 (+36.7% over
+the original 0.0283 baseline, +20.2% over ticket 3's dilated winner),
+AUC-ROC 0.9882** — at 451,361 parameters (far more than ticket 3's
+31,841) but still with no overfitting signature. **Ticket 5's
+comparison notebook (`notebooks/architecture_comparison.ipynb`, see
+"Architecture widening, ticket 5" above) confirms the U-Net as the
+outright winner** across every metric and closes out this round of 5
+tickets — `models/unet/tornado_unet.pt` is now this project's
+best-performing checkpoint. Open questions for future work: no
+architecture got its own hyperparameter tuning pass (all 5 shared the
+original baseline's recipe), and the U-Net itself was one config, not
+swept.
+
+Following a literature-review roadmap's Tier 1 (see "Genuine held-out
+test set" and "Gradient-boosted trees" above): a real 3-way
+train/test/val split now exists (`split_run_bins_3way`,
+`scripts/build_3way_split.py`), revealing that the U-Net's real,
+never-touched-before test AUC-PR (**0.0836**) is more than double its
+old, repeatedly-checked val number — a genuine finding about
+single-split variance at this data scale, not a bug. A gradient-boosted
+tree alternative was tried and **lost decisively** (test AUC-PR 0.0290
+vs. the U-Net's 0.0836) — best explanation: GBT has zero spatial
+receptive field, and every architecture ticket in this project found
+receptive field is what actually drives improvement. The CNN/U-Net
+direction remains the right one to keep pursuing. Ticket 1 (adding
+updraft helicity features, the literature's single most-cited tornado
+surrogate) is still running in the background as a ~3,183-run
+incremental augmentation pass — not yet retrained or evaluated.
 
 - SPC tornado reports (2014–2025) downloaded and parsed to
   `data/processed/spc_tornado_reports_2014_2025.csv` (15,294 reports),
@@ -763,8 +1367,10 @@ dataset is the next step**, not yet done.
   training-set-only ~40–90x) — real evidence more data is needed.
 - `requirements.txt` has data-handling deps (`herbie-data`, `xarray`,
   `numpy`, `pandas`, `netCDF4`, `matplotlib`, `shapely`, `pyproj`,
-  `pytest`), `torch` as the first ML dependency, and `nbconvert`/
-  `ipykernel`/`nbformat` for building/executing notebooks.
+  `pytest`), `torch` as the first ML dependency, `nbconvert`/
+  `ipykernel`/`nbformat` for building/executing notebooks, and
+  `scikit-learn`/`scipy` for standardized AUC-ROC/AUC-PR/precision/
+  recall/F1 metrics (see "Model comparison summary" above).
 
 ## Repo layout
 

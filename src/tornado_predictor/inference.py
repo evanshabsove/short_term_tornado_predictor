@@ -10,21 +10,36 @@ only confirms the model learned to associate its own training labels
 with something in the input (memorization) -- not that it would
 perform well on unseen data. See training.py / dataset.py for why the
 pilot is intentionally scoped this small.
+
+load_checkpoint reconstructs a model via a small class registry keyed
+by each checkpoint's own "model_class" field, rather than assuming
+TornadoCNN -- self-describing checkpoints, matching this project's
+stated design principle (see CLAUDE.md's "Training loop" section).
+Every checkpoint saved before TornadoUNet existed has no "model_class"
+key and defaults to "TornadoCNN", reconstructing exactly as before --
+no existing checkpoint needs migration.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from tornado_predictor.model import TornadoCNN
+from tornado_predictor.unet import TornadoUNet
+
+MODEL_REGISTRY = {"TornadoCNN": TornadoCNN, "TornadoUNet": TornadoUNet}
 
 
-def load_checkpoint(path: str) -> tuple[TornadoCNN, dict]:
+def load_checkpoint(path: str) -> tuple[nn.Module, dict]:
     """Reconstructs the exact model architecture from the checkpoint's
-    saved hyperparameters, loads its weights, and sets eval mode."""
+    saved hyperparameters (via MODEL_REGISTRY, defaulting to
+    "TornadoCNN" for checkpoints saved before "model_class" existed),
+    loads its weights, and sets eval mode."""
     checkpoint = torch.load(path, weights_only=False)
-    model = TornadoCNN(**checkpoint["model_hyperparameters"])
+    model_class = MODEL_REGISTRY[checkpoint.get("model_class", "TornadoCNN")]
+    model = model_class(**checkpoint["model_hyperparameters"])
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model, checkpoint
@@ -44,7 +59,7 @@ def assert_feature_order_matches(dataset_feature_names: list[str], checkpoint: d
         )
 
 
-def predict_proba(model: TornadoCNN, X: np.ndarray) -> np.ndarray:
+def predict_proba(model: nn.Module, X: np.ndarray) -> np.ndarray:
     """X: (channels, row, col) -> probability map (row, col), via
     sigmoid on the model's raw logits (see model.py)."""
     with torch.no_grad():

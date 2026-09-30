@@ -8,6 +8,7 @@ import torch
 matplotlib.use("Agg")
 
 from tornado_predictor.inference import (
+    MODEL_REGISTRY,
     assert_feature_order_matches,
     load_checkpoint,
     plot_sample,
@@ -15,10 +16,13 @@ from tornado_predictor.inference import (
     sanity_check_against_labels,
 )
 from tornado_predictor.model import TornadoCNN
+from tornado_predictor.unet import TornadoUNet
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_PATH = REPO_ROOT / "models" / "tornado_cnn_pilot.pt"
 DATASET_PATH = REPO_ROOT / "data" / "processed" / "training_dataset_pilot.nc"
+FULL_CHECKPOINT_PATH = REPO_ROOT / "models" / "tornado_cnn_full.pt"
+FULL_VAL_DATASET_PATH = REPO_ROOT / "data" / "processed" / "training_dataset_val_full.nc"
 
 
 def _save_synthetic_checkpoint(tmp_path, in_channels=3, hidden_channels=4, feature_names=None):
@@ -40,6 +44,73 @@ def _save_synthetic_checkpoint(tmp_path, in_channels=3, hidden_channels=4, featu
 
 
 # --- load_checkpoint ---
+
+
+def _save_synthetic_unet_checkpoint(tmp_path, in_channels=3, base_channels=4, feature_names=None):
+    feature_names = feature_names or ["a", "b", "c"]
+    torch.manual_seed(0)
+    model = TornadoUNet(in_channels=in_channels, base_channels=base_channels)
+    path = tmp_path / "unet_checkpoint.pt"
+    torch.save(
+        {
+            "model_class": "TornadoUNet",
+            "model_state_dict": model.state_dict(),
+            "loss_history": [0.5, 0.3, 0.1],
+            "training_hyperparameters": {"epochs": 3},
+            "model_hyperparameters": {"in_channels": in_channels, "base_channels": base_channels},
+            "feature_names": feature_names,
+        },
+        path,
+    )
+    return path, model
+
+
+def test_load_checkpoint_dispatches_to_correct_class_via_registry(tmp_path):
+    path, original_model = _save_synthetic_unet_checkpoint(tmp_path)
+    loaded_model, checkpoint = load_checkpoint(str(path))
+
+    assert isinstance(loaded_model, TornadoUNet)
+    assert checkpoint["model_class"] == "TornadoUNet"
+
+    x = torch.randn(1, 3, 10, 12)
+    with torch.no_grad():
+        original_model.eval()
+        assert torch.allclose(loaded_model(x), original_model(x))
+
+
+def test_load_checkpoint_defaults_to_tornado_cnn_when_model_class_missing(tmp_path):
+    """Regression guard for the registry change: every checkpoint saved
+    before TornadoUNet existed has no "model_class" key and must still
+    reconstruct as TornadoCNN, not raise or default to something else."""
+    path, _ = _save_synthetic_checkpoint(tmp_path)
+    checkpoint = torch.load(str(path), weights_only=False)
+    assert "model_class" not in checkpoint
+
+    loaded_model, _ = load_checkpoint(str(path))
+    assert isinstance(loaded_model, TornadoCNN)
+    assert isinstance(loaded_model, MODEL_REGISTRY["TornadoCNN"])
+
+
+def test_real_full_checkpoint_predictions_unchanged_after_registry_change():
+    """Real-artifact backward-compatibility check, same pattern as
+    tickets 2-3's model.py regression tests: models/tornado_cnn_full.pt
+    predates the model registry and must still load/predict identically
+    after this change."""
+    if not FULL_CHECKPOINT_PATH.exists() or not FULL_VAL_DATASET_PATH.exists():
+        pytest.skip("real full-scale checkpoint or val dataset not present")
+
+    from tornado_predictor.training import DenseGridDataset
+
+    model, checkpoint = load_checkpoint(str(FULL_CHECKPOINT_PATH))
+    assert isinstance(model, TornadoCNN)
+
+    dataset = DenseGridDataset(str(FULL_VAL_DATASET_PATH))
+    X, _ = dataset[0]
+    proba = predict_proba(model, X)
+
+    # known-good value, captured from this exact checkpoint/sample
+    # before inference.py was generalized to use a model-class registry
+    assert proba.sum() == pytest.approx(37.13296, abs=1e-3)
 
 
 def test_load_checkpoint_reconstructs_identical_model(tmp_path):

@@ -37,9 +37,18 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 class FocalLoss(nn.Module):
     """Binary focal loss (Lin et al. 2017) over a dense (row, col) grid.
     alpha=0.25, gamma=2.0 are RetinaNet's defaults -- starting points,
-    not tuned for this dataset's ~1:23,000 imbalance. Expect to need a
-    lower alpha (more weight on the rare positive class) after some
-    validation-set experimentation."""
+    not tuned for this dataset's imbalance.
+
+    alpha_t below is `alpha` for the positive class and `1 - alpha`
+    for the negative class -- so a HIGHER alpha gives MORE weight to
+    the rare positive class, not less. (An earlier version of this
+    docstring said the opposite -- "expect to need a lower alpha" --
+    which was backwards; corrected after scripts/sweep_alpha.py
+    empirically confirmed the direction on the full-scale dataset:
+    mean_proba_positive rose monotonically with alpha across 0.1-0.9,
+    and alpha=0.9 gave the best held-out Cohen's d (3.08) and miss
+    rate (1.7%) of the values tested. See
+    notebooks/alpha_sweep_results.ipynb and CLAUDE.md "Alpha sweep".)"""
 
     def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
         super().__init__()
@@ -65,6 +74,15 @@ class DenseGridDataset(Dataset):
         self.feature_names = [v for v in ds.data_vars if v != "label"]
         # (sample, channel, row, col) -- channel-first, as torch conv layers expect
         self.X = np.stack([ds[v].values for v in self.feature_names], axis=1).astype("float32")
+        # 0-2km/0-3km updraft helicity are NaN before 2018-07-13 (HRRR
+        # didn't output them yet -- see features.py's module docstring);
+        # a no-op for every dataset without that gap (pilot, scaled,
+        # split-demo, the original full-scale build). Imputed to 0.0
+        # here, at model-input time, not in the stored .nc file, so the
+        # dataset itself stays honest about what's real vs. missing --
+        # the model can still condition on missingness explicitly via
+        # the always-present uh_layers_available feature.
+        self.X = np.nan_to_num(self.X, nan=0.0)
         self.y = ds["label"].values.astype("float32")  # (sample, row, col)
         self.is_active = self.y.sum(axis=(1, 2)) > 0
 

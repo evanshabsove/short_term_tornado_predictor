@@ -1,6 +1,13 @@
 import pandas as pd
 
-from tornado_predictor.split import assign_date_split, report_split_balance, split_run_bins
+from tornado_predictor.split import (
+    assign_date_split,
+    assign_date_split_3way,
+    report_split_balance,
+    report_split_balance_3way,
+    split_run_bins,
+    split_run_bins_3way,
+)
 
 
 def test_assign_date_split_matches_known_boundary_crossings():
@@ -85,4 +92,140 @@ def test_report_split_balance_handles_empty_split():
     labels_df = pd.DataFrame(columns=["init_time", "bin_index"])
     report = report_split_balance(labels_df, [], [])
     assert report["train"]["n_samples"] == 0
+    assert report["val"]["n_samples"] == 0
+
+
+# --- 3-way split ---
+# real day-of-year / mod-20 values, verified by hand (same style as the
+# 2-way tests above): 333->13 (train), 334->14 (test), 336->16 (test),
+# 337->17 (val), 339->19 (val), 340->0 (train)
+
+
+def test_assign_date_split_3way_matches_known_boundary_crossings():
+    assert assign_date_split_3way("2021-11-29") == "train"  # day 333, mod 13
+    assert assign_date_split_3way("2021-11-30") == "test"  # day 334, mod 14
+    assert assign_date_split_3way("2021-12-02") == "test"  # day 336, mod 16
+    assert assign_date_split_3way("2021-12-03") == "val"  # day 337, mod 17
+    assert assign_date_split_3way("2021-12-05") == "val"  # day 339, mod 19
+    assert assign_date_split_3way("2021-12-06") == "train"  # day 340, mod 0
+
+
+def test_assign_date_split_3way_val_matches_2way_val_exactly():
+    """The core design requirement: every date the 2-way split calls
+    val must get the same "val" label under the 3-way split too, so
+    every AUC-PR already reported against val still describes the same
+    data. Checked across 2 full mod-20 cycles, not just the known
+    boundary dates above."""
+    for offset in range(40):
+        date = pd.Timestamp("2021-01-01") + pd.Timedelta(days=offset)
+        if assign_date_split(date) == "val":
+            assert assign_date_split_3way(date) == "val"
+
+
+def test_assign_date_split_3way_train_is_a_subset_of_2way_train():
+    """The new, smaller train (mod 0-13) must be a strict subset of the
+    old train (mod 0-16) -- nothing moves OUT of train into val, only
+    some of train is carved into the new test."""
+    for offset in range(40):
+        date = pd.Timestamp("2021-01-01") + pd.Timedelta(days=offset)
+        if assign_date_split_3way(date) == "train":
+            assert assign_date_split(date) == "train"
+
+
+def test_split_run_bins_3way_keeps_whole_date_together():
+    run_bins = [
+        (pd.Timestamp("2021-12-10 21:00"), 0),  # day 344, mod 4 -> train
+        (pd.Timestamp("2021-12-10 22:00"), 0),
+        (pd.Timestamp("2021-12-10 23:00"), 1),
+    ]
+    train, test, val = split_run_bins_3way(run_bins, buffer_hours=0)
+    assert set(train) == set(run_bins)
+    assert test == [] and val == []
+
+
+def test_split_run_bins_3way_separates_all_three_groups():
+    train_run = (pd.Timestamp("2021-11-29 12:00"), 0)  # train
+    test_run = (pd.Timestamp("2021-11-30 12:00"), 0)  # test
+    val_run = (pd.Timestamp("2021-12-03 12:00"), 0)  # val
+
+    train, test, val = split_run_bins_3way([train_run, test_run, val_run], buffer_hours=1)
+
+    assert train == [train_run]
+    assert test == [test_run]
+    assert val == [val_run]
+
+
+def test_buffer_safeguard_drops_train_near_test():
+    # 2021-11-29 (train) -> 2021-11-30 (test), real boundary crossing.
+    train_run = (pd.Timestamp("2021-11-29 23:00"), 0)
+    test_run = (pd.Timestamp("2021-11-30 00:00"), 0)
+
+    train, test, val = split_run_bins_3way([train_run, test_run], buffer_hours=24)
+    assert train == []  # dropped, not reassigned
+    assert test == [test_run]  # test is never dropped
+
+
+def test_buffer_safeguard_drops_val_near_test():
+    # 2021-12-02 (test) -> 2021-12-03 (val), real boundary crossing.
+    test_run = (pd.Timestamp("2021-12-02 23:00"), 0)
+    val_run = (pd.Timestamp("2021-12-03 00:00"), 0)
+
+    train, test, val = split_run_bins_3way([test_run, val_run], buffer_hours=24)
+    assert val == []  # dropped
+    assert test == [test_run]  # test is never dropped
+
+
+def test_buffer_safeguard_drops_train_near_val_even_when_not_mod_adjacent():
+    """train and val are no longer mod-adjacent under the 3-way rule
+    (test always sits between them in the mod-20 cycle, a full 3-day
+    block), so this scenario can't be demonstrated with two naturally
+    calendar-adjacent dates the way the train-near-test/val-near-test
+    tests above can -- the closest a real train date and a real val
+    date can be is ~4 days apart (test_run_bins_3way_separates_all_three_groups'
+    2021-11-29 train / 2021-12-03 val). The rule (drop train within
+    buffer_hours of ANY val sample) must still hold at a large enough
+    buffer to span that gap."""
+    train_run = (pd.Timestamp("2021-11-29 12:00"), 0)  # mod 13 -> train
+    val_run = (pd.Timestamp("2021-12-03 12:00"), 0)  # mod 17 -> val, 4 days later
+
+    train, test, val = split_run_bins_3way([train_run, val_run], buffer_hours=96)
+    assert train == []
+    assert val == [val_run]
+
+
+def test_buffer_safeguard_keeps_samples_far_from_test_and_val():
+    train_run = (pd.Timestamp("2021-11-01 00:00"), 0)  # far from everything below
+    test_run = (pd.Timestamp("2021-11-30 12:00"), 0)
+    val_run = (pd.Timestamp("2021-12-03 12:00"), 0)
+
+    train, test, val = split_run_bins_3way([train_run, test_run, val_run], buffer_hours=24)
+    assert train == [train_run]
+    assert test == [test_run]
+    assert val == [val_run]
+
+
+def test_report_split_balance_3way_computes_positive_rate():
+    labels_df = pd.DataFrame(
+        [
+            {"init_time": pd.Timestamp("2021-11-29 21:00"), "bin_index": 0},
+            {"init_time": pd.Timestamp("2021-11-30 21:00"), "bin_index": 0},
+            {"init_time": pd.Timestamp("2021-12-03 21:00"), "bin_index": 1},
+        ]
+    )
+    train_run_bins = [(pd.Timestamp("2021-11-29 21:00"), 0), (pd.Timestamp("2021-11-01 00:00"), 0)]
+    test_run_bins = [(pd.Timestamp("2021-11-30 21:00"), 0)]
+    val_run_bins = [(pd.Timestamp("2021-12-03 21:00"), 1)]
+
+    report = report_split_balance_3way(labels_df, train_run_bins, test_run_bins, val_run_bins)
+
+    assert report["train"] == {"n_samples": 2, "n_positive_samples": 1, "positive_rate": 0.5}
+    assert report["test"] == {"n_samples": 1, "n_positive_samples": 1, "positive_rate": 1.0}
+    assert report["val"] == {"n_samples": 1, "n_positive_samples": 1, "positive_rate": 1.0}
+
+
+def test_report_split_balance_3way_handles_empty_splits():
+    labels_df = pd.DataFrame(columns=["init_time", "bin_index"])
+    report = report_split_balance_3way(labels_df, [], [], [])
+    assert report["train"]["n_samples"] == 0
+    assert report["test"]["n_samples"] == 0
     assert report["val"]["n_samples"] == 0
