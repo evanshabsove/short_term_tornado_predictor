@@ -183,6 +183,52 @@ def report_split_balance_3way(
     }
 
 
+def assign_year(date) -> int:
+    """Calendar year of a date, used to group run_bins into
+    leave-one-year-out cross-validation folds (see
+    split_run_bins_year_holdout)."""
+    return pd.Timestamp(date).year
+
+
+def available_years(run_bins: list[tuple]) -> list[int]:
+    """Sorted list of distinct calendar years present in a run_bins
+    list -- the set of valid `held_out_year` values for
+    split_run_bins_year_holdout."""
+    return sorted({assign_year(init_time) for init_time, _ in run_bins})
+
+
+def split_run_bins_year_holdout(
+    run_bins: list[tuple],
+    held_out_year: int,
+    buffer_hours: float = DEFAULT_BUFFER_HOURS,
+) -> tuple[list[tuple], list[tuple]]:
+    """Splits run_bins into (train, test) for one leave-one-year-out
+    cross-validation fold: every run_bin whose init_time falls in
+    `held_out_year` goes to test, everything else to train. Applies the
+    same temporal buffer safeguard as split_run_bins (drop train
+    run_bins within `buffer_hours` of any test run_bin's init_time) --
+    needed here because a held-out year's boundary is a real adjacency
+    risk too: Dec 31 of the prior year and Jan 1 of the held-out year
+    are consecutive calendar dates, the same kind of abrupt split flip
+    split_run_bins's buffer was built to guard against, just at a
+    year boundary instead of a mod-20 one."""
+    run_bins = [(pd.Timestamp(init_time), bin_index) for init_time, bin_index in run_bins]
+
+    test = [(init_time, bin_index) for init_time, bin_index in run_bins if assign_year(init_time) == held_out_year]
+    train = [(init_time, bin_index) for init_time, bin_index in run_bins if assign_year(init_time) != held_out_year]
+
+    if test and buffer_hours > 0:
+        test_times = [init_time for init_time, _ in test]
+        buffer = pd.Timedelta(hours=buffer_hours)
+        train = [
+            (init_time, bin_index)
+            for init_time, bin_index in train
+            if not any(abs(init_time - t) <= buffer for t in test_times)
+        ]
+
+    return train, test
+
+
 def report_split_balance(labels_df: pd.DataFrame, train_run_bins: list[tuple], val_run_bins: list[tuple]) -> dict:
     """Reports sample counts and the resulting tornado-positive rate
     for each split, so an accidental imbalance from the date-based

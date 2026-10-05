@@ -142,6 +142,16 @@ def select_quiet_dates(reports_df: pd.DataFrame, n: int, end: pd.Timestamp, seed
     return sorted(quiet)
 
 
+def select_all_quiet_dates(reports_df: pd.DataFrame, end: pd.Timestamp) -> list[pd.Timestamp]:
+    """Every UTC calendar date in [ARCHIVE_START, end) with zero SPC
+    tornado reports -- the exhaustive complement of select_active_dates,
+    unlike select_quiet_dates's random n-sample. Scales the negative
+    class to full coverage instead of a partial sample."""
+    active = set(pd.to_datetime(reports_df["timestamp_utc"]).dt.normalize().unique())
+    all_days = pd.date_range(ARCHIVE_START, end, freq="D", inclusive="left")
+    return [d for d in all_days if d not in active]
+
+
 def load_manifest(path: Path) -> dict:
     if path.exists():
         return json.loads(path.read_text())
@@ -187,43 +197,86 @@ def process_one_run(
     return True, str(out_path)
 
 
+def combine_staged_runs(staging_dir: Path, run_bins_subset: list[tuple]) -> xr.Dataset | None:
+    """Combines staged per-run samples for an arbitrary run_bins subset
+    into one in-memory xr.Dataset -- shared by finalize(), finalize_3way(),
+    and scripts/cross_validate_year.py's per-fold combining. Loads fully
+    into memory (`.load()`) before closing the source per-run file
+    handles, so the returned Dataset is safe to use however the caller
+    likes (write to netcdf, or consume directly) -- the original inline
+    version only worked because its callers happened to call
+    `to_netcdf` (which forces the read) before closing; that implicit
+    ordering dependency would have been a trap for a third caller."""
+    if not run_bins_subset:
+        return None
+    per_run = {}
+    datasets = []
+    for init_time, bin_index in run_bins_subset:
+        if init_time not in per_run:
+            per_run[init_time] = xr.open_dataset(run_staging_path(staging_dir, init_time))
+        datasets.append(per_run[init_time].isel(sample=[bin_index]))
+    combined = xr.concat(datasets, dim="sample")
+    combined = combined.assign_coords(
+        init_time=("sample", [i for i, _ in run_bins_subset]),
+        bin_index=("sample", [b for _, b in run_bins_subset]),
+    ).load()
+    for ds in per_run.values():
+        ds.close()
+    return combined
+
+
+def _drop_columns_and_verify(combined: xr.Dataset, drop_columns: list[str] | None) -> xr.Dataset:
+    """Drops drop_columns from combined (errors="ignore" -- a no-op for
+    any run that never had them) and asserts zero NaN remains in what's
+    left. Needed when combining runs staged before vs. after
+    features.py's FIELD_SPECS changed (e.g. the UH fields becoming
+    unconditional) -- xr.concat silently NaN-fills a variable missing
+    from some of the combined runs rather than erroring (verified
+    directly), so a plain drop without this check could mask a real,
+    unrelated NaN source."""
+    if not drop_columns:
+        return combined
+    remaining = combined.drop_vars(drop_columns, errors="ignore")
+    for var in remaining.data_vars:
+        assert not bool(np.isnan(remaining[var].values).any()), (
+            f"unexpected NaN in {var!r} after dropping {drop_columns} -- "
+            "a real NaN source, not just the known old/new schema mismatch"
+        )
+    return remaining
+
+
 def finalize(
     staging_dir: Path,
     completed_runs: list[pd.Timestamp],
     out_train: Path,
     out_val: Path,
     buffer_hours: float = 24.0,
+    drop_columns: list[str] | None = None,
 ) -> dict:
     """Combines every completed run's staged sample into leakage-safe
     train/val files, via the same split.split_run_bins used everywhere
     else in this project. Multiple runs on the same calendar date land
     in the same split automatically -- split_run_bins groups by the
-    UTC calendar date of init_time, independent of hour."""
+    UTC calendar date of init_time, independent of hour.
+
+    drop_columns, if given, strips those variables from the combined
+    output (see _drop_columns_and_verify) -- for reconciling a dataset
+    built from staged runs with two different schemas, e.g. some pulled
+    before features.py always included UH fields and some after."""
     run_bins = [(init_time, bin_index) for init_time in completed_runs for bin_index in range(N_BINS)]
     train_run_bins, val_run_bins = split_run_bins(run_bins, buffer_hours=buffer_hours)
 
-    def combine(run_bins_subset, out_path):
-        if not run_bins_subset:
+    def combine_and_save(run_bins_subset, out_path):
+        combined = combine_staged_runs(staging_dir, run_bins_subset)
+        if combined is None:
             return 0
-        per_run = {}
-        datasets = []
-        for init_time, bin_index in run_bins_subset:
-            if init_time not in per_run:
-                per_run[init_time] = xr.open_dataset(run_staging_path(staging_dir, init_time))
-            datasets.append(per_run[init_time].isel(sample=[bin_index]))
-        combined = xr.concat(datasets, dim="sample")
-        combined = combined.assign_coords(
-            init_time=("sample", [i for i, _ in run_bins_subset]),
-            bin_index=("sample", [b for _, b in run_bins_subset]),
-        )
+        combined = _drop_columns_and_verify(combined, drop_columns)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         combined.to_netcdf(out_path)
-        for ds in per_run.values():
-            ds.close()
         return combined.sizes["sample"]
 
-    n_train = combine(train_run_bins, out_train)
-    n_val = combine(val_run_bins, out_val)
+    n_train = combine_and_save(train_run_bins, out_train)
+    n_val = combine_and_save(val_run_bins, out_val)
     return {"n_train": n_train, "n_val": n_val, "n_dropped": len(run_bins) - len(train_run_bins) - len(val_run_bins)}
 
 
@@ -234,6 +287,7 @@ def finalize_3way(
     out_test: Path,
     out_val: Path,
     buffer_hours: float = 24.0,
+    drop_columns: list[str] | None = None,
 ) -> dict:
     """Same combine-from-staging pattern as finalize(), but produces a
     genuine held-out train/test/val split via split.split_run_bins_3way
@@ -241,33 +295,24 @@ def finalize_3way(
     finalize() (not replacing it) so every existing caller keeps
     working unchanged. staging_dir is not hardcoded to any particular
     build, so this works against data/interim/scaled_build_v2/ today
-    and scaled_build_v3/ once available, with no code changes."""
+    and scaled_build_v3/ once available, with no code changes.
+
+    drop_columns: see finalize()'s docstring."""
     run_bins = [(init_time, bin_index) for init_time in completed_runs for bin_index in range(N_BINS)]
     train_run_bins, test_run_bins, val_run_bins = split_run_bins_3way(run_bins, buffer_hours=buffer_hours)
 
-    def combine(run_bins_subset, out_path):
-        if not run_bins_subset:
+    def combine_and_save(run_bins_subset, out_path):
+        combined = combine_staged_runs(staging_dir, run_bins_subset)
+        if combined is None:
             return 0
-        per_run = {}
-        datasets = []
-        for init_time, bin_index in run_bins_subset:
-            if init_time not in per_run:
-                per_run[init_time] = xr.open_dataset(run_staging_path(staging_dir, init_time))
-            datasets.append(per_run[init_time].isel(sample=[bin_index]))
-        combined = xr.concat(datasets, dim="sample")
-        combined = combined.assign_coords(
-            init_time=("sample", [i for i, _ in run_bins_subset]),
-            bin_index=("sample", [b for _, b in run_bins_subset]),
-        )
+        combined = _drop_columns_and_verify(combined, drop_columns)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         combined.to_netcdf(out_path)
-        for ds in per_run.values():
-            ds.close()
         return combined.sizes["sample"]
 
-    n_train = combine(train_run_bins, out_train)
-    n_test = combine(test_run_bins, out_test)
-    n_val = combine(val_run_bins, out_val)
+    n_train = combine_and_save(train_run_bins, out_train)
+    n_test = combine_and_save(test_run_bins, out_test)
+    n_val = combine_and_save(val_run_bins, out_val)
     return {
         "n_train": n_train,
         "n_test": n_test,

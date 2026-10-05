@@ -11,7 +11,13 @@ from tornado_predictor.training import DenseGridDataset, FocalLoss
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PILOT_DATASET_PATH = REPO_ROOT / "data" / "processed" / "training_dataset_pilot.nc"
 FULL_CHECKPOINT_PATH = REPO_ROOT / "models" / "tornado_cnn_full.pt"
-FULL_VAL_DATASET_PATH = REPO_ROOT / "data" / "processed" / "training_dataset_val_full.nc"
+# Pinned to the archived v2 (14-feature) file, not the current canonical
+# training_dataset_val_full.nc -- that now points at the UH-enriched v3
+# dataset (21 features, see CLAUDE.md "Updraft helicity features"), which
+# tornado_cnn_full.pt/tornado_cnn_h32_l5.pt (trained on 14 features) can't
+# run on at all. These tests check those specific checkpoints' backward
+# compatibility, not whatever the canonical file currently is.
+FULL_VAL_DATASET_PATH = REPO_ROOT / "data" / "processed" / "training_dataset_val_full_v2_superseded.nc"
 H32_L5_CHECKPOINT_PATH = REPO_ROOT / "models" / "architecture_sweep" / "tornado_cnn_h32_l5.pt"
 
 GRID = build_coarse_grid()

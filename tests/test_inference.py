@@ -22,7 +22,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CHECKPOINT_PATH = REPO_ROOT / "models" / "tornado_cnn_pilot.pt"
 DATASET_PATH = REPO_ROOT / "data" / "processed" / "training_dataset_pilot.nc"
 FULL_CHECKPOINT_PATH = REPO_ROOT / "models" / "tornado_cnn_full.pt"
-FULL_VAL_DATASET_PATH = REPO_ROOT / "data" / "processed" / "training_dataset_val_full.nc"
+# Pinned to the archived v2 (14-feature) file -- see test_model.py's
+# identical constant for why (the canonical file now has 21 features).
+FULL_VAL_DATASET_PATH = REPO_ROOT / "data" / "processed" / "training_dataset_val_full_v2_superseded.nc"
 
 
 def _save_synthetic_checkpoint(tmp_path, in_channels=3, hidden_channels=4, feature_names=None):

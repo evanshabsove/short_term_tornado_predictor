@@ -969,6 +969,144 @@ this dataset's size easily).
 - Model: `models/gbt/tornado_gbt.joblib`. Results:
   `models/gbt/results.json`.
 
+### Updraft helicity features (Tier 1 roadmap, ticket 1) — did not help
+
+The data pull (section above, `scripts/augment_dataset_fields.py`)
+finished successfully: 3,182 of 3,183 runs augmented (one sustained
+network outage mid-job cost 851 runs, recovered via `--retry-failed`
+once connectivity returned — down to 1 genuine remaining failure).
+Verified before use: 22 variables, `uh_0_2km`/`uh_0_3km` NaN fraction
+(~31%) matches the known 2018-07-13 archive boundary exactly,
+`uh_2_5km` has zero NaN as expected. Promoted to canonical filenames
+(`training_dataset_{train,val}_full.nc` and the 3-way equivalents),
+archiving the prior 14-feature v2 files as `_v2_superseded` — same
+precedent as the v1→v2 promotion.
+
+The U-Net (21 features now: the original 14 + 6 UH mean/max + the
+`uh_layers_available` indicator) was retrained on the enriched 3-way
+train set and evaluated on both val and test, identical recipe
+(`alpha=0.25`, 50 epochs, seed=0) to every prior run:
+
+| model | val AUC-PR | test AUC-PR | val Cohen's d | test Cohen's d |
+|---|---|---|---|---|
+| U-Net, 14 features (no UH) | 0.0398 | **0.0836** | 2.27 | 2.59 |
+| U-Net, 16 features (UH25 only, zero NaN) | 0.0377 | 0.0528 | 2.97 | 3.01 |
+| U-Net, 21 features (+UH, NaN-imputed) | 0.0359 | 0.0491 | 2.77 | 2.86 |
+
+- **Adding the literature's single most-cited tornado surrogate made
+  AUC-PR *worse*** — val -9.8%, test -41.3% — despite Cohen's d
+  *improving* on both splits. Reported exactly as found: this is the
+  literature's actual answer not replicating, same honest treatment as
+  the GBT result above, not spun positive because it was expected to
+  help.
+- **A third, independent instance of the same Cohen's d / AUC-PR
+  divergence** (alpha sweep; GBT vs. U-Net; now UH features) — a
+  genuinely recurring pattern in this project at this point, not a
+  one-off. Mean separation between positive and negative cells keeps
+  improving across these three cases while rank-based precision against
+  the full negative population gets worse or stays flat — a strong
+  argument that any future hyperparameter/feature decision in this
+  project should be judged by AUC-PR specifically, never by Cohen's d
+  alone, no exceptions.
+- **No overfitting signature** (final val loss 0.000114 vs. train loss
+  0.000146, the same healthy pattern as every non-overfit run in this
+  project) — the regression isn't explained by the model fitting worse
+  to begin with.
+- **Resolved by a targeted ablation (user-proposed): UH itself is the
+  dominant cause, not the NaN-imputation handling.** Retrained with
+  *only* `uh_2_5km` (the field available for the whole archive, zero
+  NaN anywhere — eliminates the missing-data/`uh_layers_available`
+  explanation entirely): test AUC-PR = 0.0528, still 36.8% below the
+  no-UH baseline (0.0836) and barely above the full 21-feature version
+  (0.0491, +7.5% relative). If missing-data confusion had been the main
+  driver, this clean-data version should have landed close to 0.0836 —
+  it didn't. The small residual gap (0.0491 → 0.0528) shows the NaN
+  handling was a real but secondary contributor, not the main story.
+  **This is also the cleanest instance yet of the Cohen's d / AUC-PR
+  divergence**: Cohen's d rises monotonically as UH is added (2.59 →
+  2.86 → 3.01, UH25-only alone reaching the *highest* separation of
+  all three configs) while AUC-PR falls at every step. Likely
+  explanation: UH25 is a general supercell/rotation surrogate — it's
+  elevated on many strong non-tornadic storms too, so it widens the
+  average positive/negative gap (truly tornadic cells have even higher
+  UH) while also creating more confidently-wrong false positives among
+  rotating-but-non-tornadic cells, which is precisely what hurts
+  precision-sensitive AUC-PR without hurting mean separation.
+- Checkpoints: `models/unet_v3features/tornado_unet_v3features.pt` (21
+  features), `models/unet_uh25only/tornado_unet_uh25only.pt` (16
+  features, UH25-only ablation). Results:
+  `models/unet_v3features/results.json`,
+  `models/unet_uh25only/results.json`. **The project's best checkpoint
+  remains the original 14-feature U-Net** (`models/unet/tornado_unet.pt`,
+  test AUC-PR 0.0836) — neither UH variant beats it; both are
+  documented negative results, and UH (at least these layers, at this
+  training budget) is not recommended as a feature for this task.
+
+### Year-holdout cross-validation (resolves the val/test instability)
+
+Every AUC-PR reported above came from one fixed train/val(/test) split —
+and the 3-way val (0.0398) vs. test (0.0836) numbers for the identical
+frozen U-Net checkpoint differed by >2x, with no way to tell whether
+either was "the truth." `src/tornado_predictor/split.py` gained
+`assign_year`, `available_years`, `split_run_bins_year_holdout` (additive,
+same pattern as the 2-way/3-way functions); `build_scaled.py`'s duplicated
+`combine()` closure was extracted into a shared, reusable
+`combine_staged_runs` helper (with a real `.load()` correctness fix —
+the original inline version only worked because its callers happened to
+call `to_netcdf` before closing source file handles). `scripts/cross_validate_year.py`
+runs 12 leave-one-year-out folds (2014-2025) on the identical established
+recipe (`TornadoUNet(base_channels=16)`, alpha=0.25, 50 epochs, seed=0),
+reusing the already-staged v2 runs — no new HRRR pulls. Full results and
+plots: `notebooks/cv_year_holdout_results.ipynb`.
+
+| held-out year | test samples | AUC-PR | AUC-ROC | Cohen's d |
+|---|---|---|---|---|
+| 2014 | 88 | 0.0314 | 0.9881 | 2.80 |
+| 2015 | 528 | 0.0276 | 0.9773 | 1.95 |
+| 2016 | 484 | 0.0309 | 0.9765 | 2.37 |
+| 2017 | 582 | 0.0466 | 0.9896 | 2.55 |
+| 2018 | 524 | 0.0427 | 0.9887 | 2.86 |
+| 2019 | 644 | 0.0362 | 0.9868 | 2.98 |
+| 2020 | 524 | 0.0554 | 0.9879 | 2.43 |
+| 2021 | 572 | 0.0447 | 0.9895 | 3.05 |
+| 2022 | 564 | 0.0740 | 0.9902 | 2.80 |
+| 2023 | 616 | 0.0526 | 0.9879 | 2.85 |
+| 2024 | 660 | 0.0486 | 0.9810 | 2.66 |
+| 2025 | 580 | 0.0925 | 0.9912 | 3.06 |
+
+- **The trustworthy performance number for `models/unet/tornado_unet.pt`
+  is AUC-PR = 0.0486 ± 0.0180** (12 folds, coefficient of variation
+  ~37%, min 0.0276, max 0.0925) — this, not any single split, is what
+  should be cited as "how good is this model" going forward.
+- **The old test number (0.0836) was an unusually favorable draw, not a
+  stable baseline**: z = +1.94 relative to the CV distribution, and 11 of
+  12 independent year-folds score *below* it. The old val number (0.0398)
+  was, by contrast, fairly representative (z = -0.49, 4/12 folds below
+  it). This directly explains the >2x val/test swing that motivated this
+  ticket — both numbers were just different draws from a genuinely wide
+  underlying distribution; test happened to land around the 92nd
+  percentile of it, not because of leakage or a stronger model, just split
+  luck.
+- **An unexpected, statistically significant finding**: AUC-PR correlates
+  strongly with calendar year (Pearson r = 0.79, p = 0.002, still r = 0.77,
+  p = 0.005 excluding the small-sample 2014 fold) — 2020-2025 averages
+  0.0613 vs. 2015-2019's 0.0359, a 71% relative increase. Not something
+  this project changed (identical model/features/recipe every fold) —
+  leading, unconfirmed hypothesis is that it reflects HRRR's own forecast
+  skill improving over its operational history (notably the HRRRv3→v4
+  upgrade, operational since Dec 2020, right at this trend's inflection
+  point) rather than anything about this pipeline. SPC labeling-practice
+  changes over time are an uneliminated alternative explanation. Worth
+  investigating before the next architecture/feature round, since it may
+  mean recent years are systematically easier to predict on for reasons
+  outside this project's control.
+- Checkpoints: `models/cv_year_holdout/tornado_unet_heldout_<year>.pt`.
+  Results: `models/cv_year_holdout/results.json`.
+- **Not yet done**: re-running this CV on the quiet-date-scaled dataset or
+  with pressure features once those tickets land — a natural follow-up,
+  not required immediately. This CV describes the dataset as it stood
+  before both.
+
 ### Validation against a documented case
 
 `scripts/validate_documented_case.py` spot-checks the grid/time-bin/
@@ -1302,8 +1440,36 @@ receptive field, and every architecture ticket in this project found
 receptive field is what actually drives improvement. The CNN/U-Net
 direction remains the right one to keep pursuing. Ticket 1 (adding
 updraft helicity features, the literature's single most-cited tornado
-surrogate) is still running in the background as a ~3,183-run
-incremental augmentation pass — not yet retrained or evaluated.
+surrogate) also finished — the enriched dataset is now the canonical
+one, but retraining the U-Net on it made AUC-PR *worse* (test: 0.0836 →
+0.0491), a third instance of Cohen's d improving while AUC-PR dropped.
+A follow-up ablation (user-proposed: retrain on UH25 alone, the one
+layer with zero missing data, to rule out NaN-imputation as the cause)
+confirmed UH itself — not the missing-data handling — is the dominant
+driver of the regression: test AUC-PR only recovered to 0.0528, still
+36.8% below the no-UH baseline (see "Updraft helicity features" above).
+**All 3 Tier 1 tickets are now complete; none improved on the original
+14-feature U-Net, which remains this project's best checkpoint.** The
+recurring Cohen's d/AUC-PR divergence across three unrelated
+experiments is itself the most actionable finding from this whole
+round: trust AUC-PR, not mean-separation metrics, for every future
+decision here.
+
+A **12-fold leave-one-year-out cross-validation** (see "Year-holdout
+cross-validation" above) resolved the val/test instability directly:
+the trustworthy number for `models/unet/tornado_unet.pt` is **AUC-PR =
+0.0486 ± 0.0180**, not the previously-headlined 0.0836 test figure,
+which turned out to be an unusually favorable single draw (92nd
+percentile of the 12 folds). The CV also surfaced a real, significant,
+unexplained upward trend in skill by calendar year (r=0.79, p=0.002) —
+plausibly tied to HRRR's own forecast-skill improvements over time
+rather than anything in this pipeline, flagged for future investigation,
+not yet resolved. Two follow-up tickets are queued next: scaling the
+training data to full quiet-date coverage (1,682 additional quiet dates
+beyond the current 300), and engineering a pressure-tendency feature
+from HRRR's own forecast fields (motivated by the sibling `tornet`
+project's experience with pressure-change features) — both written up
+as Trello-style starter-prompt tickets rather than implemented yet.
 
 - SPC tornado reports (2014–2025) downloaded and parsed to
   `data/processed/spc_tornado_reports_2014_2025.csv` (15,294 reports),

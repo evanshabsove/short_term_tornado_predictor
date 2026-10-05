@@ -51,13 +51,20 @@ def main() -> None:
     parser.add_argument("--out-test", type=Path, default=DEFAULT_OUT_TEST)
     parser.add_argument("--out-val", type=Path, default=DEFAULT_OUT_VAL)
     parser.add_argument("--buffer-hours", type=float, default=24.0)
+    parser.add_argument(
+        "--drop-columns", nargs="+", default=None,
+        help="variable names to drop from the combined output before saving (e.g. to reconcile runs staged with different feature sets) -- see build_scaled.finalize_3way",
+    )
     args = parser.parse_args()
 
     manifest = load_manifest(args.manifest)
     completed_runs = sorted(pd.Timestamp(k) for k, v in manifest.items() if v["status"] == "done")
     print(f"{len(completed_runs)} completed runs in {args.manifest}")
 
-    result = finalize_3way(args.staging_dir, completed_runs, args.out_train, args.out_test, args.out_val, buffer_hours=args.buffer_hours)
+    result = finalize_3way(
+        args.staging_dir, completed_runs, args.out_train, args.out_test, args.out_val,
+        buffer_hours=args.buffer_hours, drop_columns=args.drop_columns,
+    )
     print(f"Finalized: {result}")
     print(f"Saved train -> {args.out_train}")
     print(f"Saved test  -> {args.out_test}")

@@ -47,6 +47,7 @@ from tornado_predictor.build_scaled import (
     process_one_run,
     save_manifest,
     select_active_runs,
+    select_all_quiet_dates,
     select_quiet_dates,
 )
 from tornado_predictor.grid import HrrrCoarseGrid
@@ -76,13 +77,25 @@ def main() -> None:
     parser.add_argument("--out-val", type=Path, default=DEFAULT_OUT_VAL)
     parser.add_argument("--n-quiet", type=int, default=N_QUIET_DATES)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--quiet-mode", choices=["sample", "all"], default="sample",
+        help="'sample' (default): randomly sample --n-quiet quiet dates. "
+             "'all': use every remaining quiet date in the archive (ignores --n-quiet/--seed) -- full negative-class coverage instead of a partial sample.",
+    )
+    parser.add_argument(
+        "--drop-columns", nargs="+", default=None,
+        help="variable names to drop from the combined output before saving (e.g. to reconcile runs staged with different feature sets) -- see build_scaled.finalize",
+    )
     parser.add_argument("--finalize-only", action="store_true", help="skip pulling, just combine completed runs")
     parser.add_argument("--retry-failed", action="store_true", help="also retry runs previously marked failed")
     args = parser.parse_args()
 
     reports_df = pd.read_csv(args.reports, parse_dates=["timestamp_utc"])
     active_runs = select_active_runs(reports_df)
-    quiet_dates = select_quiet_dates(reports_df, n=args.n_quiet, end=SPC_LABEL_CEILING, seed=args.seed)
+    if args.quiet_mode == "all":
+        quiet_dates = select_all_quiet_dates(reports_df, end=SPC_LABEL_CEILING)
+    else:
+        quiet_dates = select_quiet_dates(reports_df, n=args.n_quiet, end=SPC_LABEL_CEILING, seed=args.seed)
     quiet_runs = [pd.Timestamp(f"{d.date()} {QUIET_RUN_HOUR}") for d in quiet_dates]
     all_runs = sorted(active_runs + quiet_runs)
     print(f"{len(active_runs)} active runs (report-covering) + {len(quiet_runs)} quiet runs = {len(all_runs)} total")
@@ -116,7 +129,7 @@ def main() -> None:
     print(f"\nManifest: {n_done} done, {n_failed} failed")
 
     completed_runs = [r for r in all_runs if manifest.get(key(r), {}).get("status") == "done"]
-    result = finalize(args.staging_dir, completed_runs, args.out_train, args.out_val)
+    result = finalize(args.staging_dir, completed_runs, args.out_train, args.out_val, drop_columns=args.drop_columns)
     print(f"Finalized: {result}")
     print(f"Saved train -> {args.out_train}")
     print(f"Saved val   -> {args.out_val}")

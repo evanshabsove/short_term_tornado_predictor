@@ -3,10 +3,13 @@ import pandas as pd
 from tornado_predictor.split import (
     assign_date_split,
     assign_date_split_3way,
+    assign_year,
+    available_years,
     report_split_balance,
     report_split_balance_3way,
     split_run_bins,
     split_run_bins_3way,
+    split_run_bins_year_holdout,
 )
 
 
@@ -229,3 +232,62 @@ def test_report_split_balance_3way_handles_empty_splits():
     assert report["train"]["n_samples"] == 0
     assert report["test"]["n_samples"] == 0
     assert report["val"]["n_samples"] == 0
+
+
+# --- year-holdout cross-validation split ---
+
+
+def test_assign_year_extracts_calendar_year():
+    assert assign_year("2021-12-10") == 2021
+    assert assign_year(pd.Timestamp("2014-09-01 20:00")) == 2014
+
+
+def test_available_years_returns_sorted_distinct_years():
+    run_bins = [
+        (pd.Timestamp("2021-12-10 21:00"), 0),
+        (pd.Timestamp("2019-05-01 12:00"), 0),
+        (pd.Timestamp("2021-01-01 00:00"), 1),
+    ]
+    assert available_years(run_bins) == [2019, 2021]
+
+
+def test_split_run_bins_year_holdout_separates_held_out_year():
+    run_2020 = (pd.Timestamp("2020-06-15 12:00"), 0)
+    run_2021 = (pd.Timestamp("2021-06-15 12:00"), 0)
+    run_2022 = (pd.Timestamp("2022-06-15 12:00"), 0)
+
+    train, test = split_run_bins_year_holdout([run_2020, run_2021, run_2022], held_out_year=2021, buffer_hours=0)
+
+    assert test == [run_2021]
+    assert set(train) == {run_2020, run_2022}
+
+
+def test_split_run_bins_year_holdout_buffer_drops_train_near_year_boundary():
+    # Dec 31 of the prior year and Jan 1 of the held-out year are
+    # consecutive calendar dates -- exactly the kind of abrupt split
+    # flip the buffer safeguard exists to protect against, now at a
+    # year boundary instead of a mod-20 one.
+    train_candidate = (pd.Timestamp("2020-12-31 23:00"), 0)
+    held_out_run = (pd.Timestamp("2021-01-01 00:00"), 0)
+
+    train, test = split_run_bins_year_holdout([train_candidate, held_out_run], held_out_year=2021, buffer_hours=24)
+
+    assert test == [held_out_run]
+    assert train == []  # the Dec-31 run is within 1h of the held-out run -- dropped
+
+
+def test_split_run_bins_year_holdout_keeps_train_far_from_year_boundary():
+    far_train_run = (pd.Timestamp("2020-06-01 00:00"), 0)
+    held_out_run = (pd.Timestamp("2021-06-01 00:00"), 0)
+
+    train, test = split_run_bins_year_holdout([far_train_run, held_out_run], held_out_year=2021, buffer_hours=24)
+
+    assert train == [far_train_run]
+    assert test == [held_out_run]
+
+
+def test_split_run_bins_year_holdout_handles_year_with_no_runs():
+    run_2020 = (pd.Timestamp("2020-06-15 12:00"), 0)
+    train, test = split_run_bins_year_holdout([run_2020], held_out_year=1999, buffer_hours=24)
+    assert train == [run_2020]
+    assert test == []
