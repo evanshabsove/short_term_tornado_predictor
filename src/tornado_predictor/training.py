@@ -144,6 +144,7 @@ def train_model(
     gamma: float = 2.0,
     quiet_keep_fraction: float = 0.2,
     seed: int = 0,
+    ema_decays: tuple[float, ...] = (),
 ) -> dict:
     """Trains model on dataset with FocalLoss + QuietMapDownsampler
     (re-drawing its quiet-map subset each epoch, since DataLoader calls
@@ -151,6 +152,17 @@ def train_model(
     {"loss_history": [...], "hyperparameters": {...}}, plus
     "val_loss_history" if val_dataset is given; saving
     model.state_dict() is the caller's responsibility.
+
+    ema_decays (default empty = off, behavior and results unchanged): for
+    each decay d, keeps an exponential moving average of the model's
+    parameters, updated after every optimizer step (ema = d*ema +
+    (1-d)*param, ~1/(1-d)-step horizon), and returns the final averaged
+    weights as result["ema_state_dicts"][d] (loadable into a fresh model
+    of the same architecture). Averaging weights rather than predictions
+    targets the seed-to-seed noise of the final iterate; it needs no
+    extra forward passes, so it adds negligible cost. Only parameters
+    are averaged -- correct for the models here, which have no
+    batch-norm running statistics or other buffers.
 
     val_dataset should come from split.split_run_bins -- a leakage-safe
     split, not an arbitrary held-out set -- and is evaluated on in full
@@ -167,6 +179,8 @@ def train_model(
     criterion = FocalLoss(alpha=alpha, gamma=gamma)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+    ema_params = {d: [p.detach().clone() for p in model.parameters()] for d in ema_decays}
+
     loss_history = []
     val_loss_history = [] if val_dataset is not None else None
     for _ in range(epochs):
@@ -177,6 +191,12 @@ def train_model(
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            if ema_params:
+                with torch.no_grad():
+                    current = [p.detach() for p in model.parameters()]
+                    for d, ema in ema_params.items():
+                        torch._foreach_mul_(ema, d)
+                        torch._foreach_add_(ema, current, alpha=1.0 - d)
             epoch_losses.append(loss.item())
         loss_history.append(float(np.mean(epoch_losses)))
         if val_dataset is not None:
@@ -196,4 +216,9 @@ def train_model(
     }
     if val_dataset is not None:
         result["val_loss_history"] = val_loss_history
+    if ema_params:
+        names = [n for n, _ in model.named_parameters()]
+        base = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        result["ema_state_dicts"] = {d: {**base, **{n: t.clone() for n, t in zip(names, ema)}} for d, ema in ema_params.items()}
+        result["hyperparameters"]["ema_decays"] = list(ema_decays)
     return result

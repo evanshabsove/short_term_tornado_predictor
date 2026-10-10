@@ -1107,6 +1107,316 @@ plots: `notebooks/cv_year_holdout_results.ipynb`.
   not required immediately. This CV describes the dataset as it stood
   before both.
 
+### Full-scale build v4 (expanded quiet dates + one retry pass)
+
+Same `scripts/build_scaled_dataset.py` / manifest (`data/interim/scaled_build_v2/`),
+re-run with `--quiet-mode all` (every remaining quiet date, not 300 sampled) and
+then `--retry-failed`. Outputs: `data/processed/training_dataset_{train,val}_full_v4.nc`
+(the canonical `_full.nc` files are untouched).
+
+- **Pulls**: first pass 4,822 done / 228 failed; after one retry pass
+  **4,919 done / 131 failed** (97 recovered). Of the original 228 failures,
+  107 were `ValueError: No index file was found` (the `.idx` is absent from
+  the AWS archive -- will not recover on retry), 49 `EOFError`, 38
+  `PrematureEndOfFileError`, 24 `FileNotFoundError`, 10 `ConnectionError`
+  (the last four are transient/cache). 195/228 failures are 2014-2018, same
+  early-archive pattern as v1/v2. Remaining 131 not pursued further.
+- **Split** (2-way, mod-20 rule, 24h buffer): 7,652 train / 1,478 val /
+  708 dropped.
+- **Sanity check (verified)**: the 14 core features have zero NaNs, no
+  all-constant samples, plausible ranges; train/val means nearly identical.
+  Active maps **43.4% train / 44.5% val** (down from ~63% -- expected, quiet
+  expansion); per-cell positive rate **1.44e-04** in both (was 2.1e-04).
+- **UH columns are mostly NaN in the v4 `_full_v4.nc` files, but NOT because the new runs lack UH (CORRECTED --
+  an earlier version of this note had it backwards):** the 3,182 original runs staged in
+  `data/interim/scaled_build_v2/` carry only the 14 base features (their UH-augmented copies live in
+  `data/interim/scaled_build_v3/`), while the 1,737 newer runs carry all 21 features natively. The v4 train/val
+  files were assembled from `scaled_build_v2/`, so the old runs' UH is NaN there (77% for `uh_0_2km`/`uh_0_3km`,
+  65% for `uh_2_5km`/`uh_layers_available`; the 0-2/0-3 km layers are additionally missing before 2018-07-13).
+  `uh_layers_available` is NaN (not 0/1) for those. **Do not train on the 21-feature `_full_v4.nc` files as-is
+  (drop the 7 UH columns, as the CV runs do).** For any UH work use `data/interim/scaled_build_uh_merged/`
+  (symlinks: the `_v3` augmented copy for the old runs, the native file for the new ones): all 4,918 of 4,919 runs
+  carry UH, `uh_2_5km` has zero NaN, `uh_0_2km` is all-NaN exactly for pre-2018-07-13 runs, and the 14 base
+  features and labels are identical to the `_v2` copies (checked on 40 runs); the one exception is 2022-10-14.
+- `scripts/cross_validate_year.py` gained `--drop-columns` (needed because
+  staged runs mix with/without UH, and xr.concat silently NaN-fills).
+- **v4 year-holdout CV result (12 folds, `models/cv_year_holdout_v4/`, 14
+  features, identical recipe): v4 is statistically indistinguishable from the
+  original -- not better, not worse.** As reported (different test sets) AUC-PR
+  is 0.0442 +/- 0.0142 vs. the original 0.0486 +/- 0.0180 (-9%, v4 wins 3/12
+  folds), but those test sets differ. Scoring both model sets on the *same*
+  samples (`scripts/compare_cv_old_vs_v4.py`, inference only; results in
+  `models/cv_year_holdout_v4/like_for_like.json`; analysis in
+  `notebooks/cv_v4_vs_v2_comparison.ipynb`): AUC-PR **-4.0%** on the full v4
+  test years (5/12 wins, paired-t p=0.54) and **-3.7%** on the old-run subset
+  (5/12, p=0.55); best-F1 flat (+0.6%/+1.1%), AUC-ROC flat (+0.1%). Per-fold
+  swings are +/-25-35% in both directions (v4 +33% in 2016, +36% in 2024; -26%
+  in 2020, -23% in 2025), so 12 single-seed folds can't resolve a ~4% mean
+  difference. Old models on the old-run subset reproduce the original CV's
+  AUC-PR to within 5e-7, validating the like-for-like setup. **Cited number
+  for the 14-feature U-Net stays ~0.045-0.049 AUC-PR**; the ~1,700 added quiet
+  runs gave no measurable ranking gain (and no measurable harm; dataset is
+  closer to natural class balance). Correction to an earlier guess: the lower
+  base rate (test positive rate -34%) only explains ~-6% of AUC-PR with the
+  model held fixed, not a large mechanical artifact. Calibration unchanged
+  (mean positive-cell p 0.1365 vs 0.1364). The calendar-year skill trend
+  persists on identical test samples (r=0.79 old, 0.87 v4). Untested:
+  `quiet_keep_fraction=0.2` means only ~20% of the new quiet maps are seen per
+  epoch. (Per-seed variance was subsequently measured and is large -- see "Seed-variance study and ensembles" below.)
+  **Precision/recall at each model's own best-F1 threshold** (now reported
+  alongside AUC-PR; already computed by `evaluate.compute_metrics`): at that
+  operating point both model sets flag ~1 in 5 positive cells (recall ~0.19-0.20)
+  at ~9% precision (~10 flagged cells per hit); best-F1 thresholds ~0.21 for
+  both. On the old-run subset precision/recall differ by 1-2% (p>0.7). On the
+  full v4 test years v4 has +20% recall (0.162 -> 0.195, 8/12 wins, p=0.061,
+  suggestive only) with -7% precision (p=0.25); the old models' recall falls
+  when scored on the quieter v4 test mix while v4 models' doesn't -- a
+  threshold-dependent operating-point effect with no matching AUC-PR gain. Not
+  a matched-recall/precision comparison (each model uses its own threshold,
+  tuned on the data it is scored on); a precision-at-fixed-recall comparison
+  from the full PR curves is the cleaner follow-up, not done.
+
+### Post-v4 diagnostics: baselines, trend confound, and sample-mix artifacts
+
+Cheap, evaluation-only analyses run after the v4 CV (scripts:
+`scripts/physics_baselines.py`, `scripts/climatology_baseline.py`; results
+`models/cv_year_holdout_v4/{physics_baselines,climatology_baseline}.json`).
+Baselines use the v4 train+val files, i.e. ~7% fewer samples than the CV test
+sets (buffer-dropped samples) -- comparison is approximate, not sample-identical.
+
+- **U-Net vs. untrained baselines (per-year AUC-PR, 12 folds):** best simple
+  physics baseline (STP-like composite, no LCL term, 5x5-smoothed max fields)
+  averages 0.016; unsmoothed STP 0.012-0.013; CAPE x SRH 0.0075; single fields
+  <=0.002; leave-one-year-out climatology (per cell, per month) ~0.0013. The v4
+  U-Net (0.044) beats the best physics baseline in 12/12 years by ~3-4x, and
+  beats climatology by ~30x. The U-Net/baseline ratio shows no trend with year
+  (r=0.13), i.e. the model's value-add is stable.
+- **The calendar-year skill trend is largely confounded with tornado-population
+  composition, not cleanly attributable to HRRR:** mean SPC track length rose
+  2.8 -> 4.9 mi and the EF0 share fell 0.54 -> 0.30 over 2016-2025 (year vs EF0
+  share r=-0.91). Per-year AUC-PR correlates with mean track length (rho
+  0.85-0.87) and EF0 share (rho -0.80 to -0.90). Controlling for track length,
+  the year effect's partial r falls from 0.79 to 0.40 (p=0.19) for the old
+  models and 0.87 to 0.61 (p=0.04) for v4. The untrained smoothed-STP baseline
+  also drifts upward with year (r~0.55). A linear trend fits slightly better
+  than a step at an HRRR upgrade boundary. 12 points cannot separate the
+  explanations; do not cite the trend as evidence of HRRR forecast-skill gains.
+- **Run-selection design shapes the sample mix (a sample-selection artifact,
+  not a labeling bug):** 70% of quiet samples are init 20Z (the fixed quiet-date
+  hour) vs. 11% of active samples, so P(active | init hour) is ~11% at 20Z but
+  60-70% at 21Z/00Z. Active runs are anchored at the earliest report's hour, so
+  positives skew to short lead: bin 0 has 2x the positive cells of bin 1 (9,778
+  vs 4,924; active frac 60.5% vs 26.6%), and per-cell positive rate is 1.4e-4
+  vs ~5e-5 over all hourly runs. Quantified below
+  (`scripts/diagnose_sample_mix.py` -> `models/cv_year_holdout_v4/
+  sample_mix_diagnostics.json`; per-fold cached scores in
+  `data/interim/diag_scores/`; 12 folds, both model sets, full v4 test years).
+
+### Sample-mix, map-level, and neighborhood diagnostics (evaluation-only)
+
+- **Raw AUC-PR is strongly prevalence-dependent; compare lift (AUC-PR / positive
+  rate) within a stratum, and never across strata.** Mean per-year (v4 models):
+  all samples AUC-PR 0.0442 (pos rate 1.39e-4, lift 321x); init 20Z only 0.0217
+  (3.1e-5, 689x); init not-20Z 0.0481 (2.3e-4, 206x); bin 0 0.0578 (1.85e-4,
+  328x); bin 1 0.0341 (9.3e-5, 368x). Lift is *not* prevalence-invariant (it falls
+  as prevalence rises: dilation k=0/1/2 -> 321x/182x/111x), so it is a
+  within-stratum yardstick only.
+- **Time-of-day shortcut: not supported as the source of skill.** Restricting to
+  init 20Z (where active and quiet maps are both ordinary) does not reduce skill
+  relative to base rate -- lift is higher (689x vs 321x), not lower. Old and v4
+  models behave the same. (Not a proof the shortcut is unused, only that skill
+  does not collapse where it is unavailable.)
+- **Short-lead skew: not supported as inflating skill either.** Bin 1 lift (368x)
+  is >= bin 0's (328x); the raw AUC-PR gap (0.058 vs 0.034) is prevalence (2x
+  fewer positives in bin 1), not worse ranking. The model's skill is apparently
+  environment-scale, not nowcast-lead-dependent.
+- **Deployment-like estimate:** the 20Z stratum (11% active maps, positive rate
+  3.1e-5) is the closest available proxy to an all-hourly-runs stream (17%
+  active, ~5e-5): **raw AUC-PR ~0.02 there, vs. 0.044 on the CV mix.** Quote
+  ~0.02-0.03 as the deployment-like expectation, not 0.044. Proxy is imperfect.
+- **Map-level discrimination is the weak link (mean over 12 years):** max
+  predicted probability separates active from quiet maps with AUC-ROC only
+  ~0.79-0.81 and map AUC-PR 0.71-0.72 vs. an active fraction of 0.42 (lift 1.7x).
+  At 50% recall of active maps, 13.5% (old) / 14.9% (v4) of quiet maps
+  false-alarm; at 80% recall, 34% / 36%. The false alarms concentrate on the
+  quiet bins of *active* runs (31-33% at 50% recall, 66-67% at 80%) rather than
+  on quiet-date runs (5.5-6.2% at 50% recall, 19-20% at 80%): the model mostly
+  rejects ordinary quiet days but struggles with *when* during a severe day
+  (timing within an active run), consistent with using a single start-of-bin
+  snapshot (fxx 0/4) per 4-hour bin. Within active maps, spatial AUC-PR is 0.054
+  (lift ~162-168x).
+- **The extra quiet training data did not improve quiet-day false alarms**, even
+  on the metric designed to see it: quiet-date-run false-alarm rate at 50%
+  recall is 5.5% (old) vs 6.2% (v4); map AUC-ROC 0.805 vs 0.794 (v4 wins 4/12,
+  p=0.27). No direction is significant. Quiet-date negatives are not where the
+  model's errors are.
+- **Neighborhood-dilated verification (scores unchanged; positive if a tornado
+  touched the cell or any cell within k cells, k=1 ~ 39 km, k=2 ~ 78 km):** v4
+  AUC-PR 0.044 -> 0.148 (k=1) -> 0.210 (k=2); best-F1 0.115 -> 0.237 -> 0.295;
+  precision at best-F1 0.084 -> 0.199 -> 0.259; recall 0.194 -> 0.298 -> 0.349.
+  Positive rate rises 6x (k=1) and 14x (k=2), so most of the AUC-PR rise is
+  prevalence (lift falls 321x -> 182x -> 111x); the informative part is that
+  precision goes 8% -> 20%, i.e. roughly 12% of flagged cells are adjacent
+  misses within one cell. v4 vs. old stays flat (-2.0% at k=1, p=0.67; -1.4% at
+  k=2, p=0.74). This is verification only -- changing the *training* labels to a
+  neighborhood definition would alter the locked labeling method and needs a
+  discussion first.
+- **Documented in `notebooks/sample_mix_diagnostics.ipynb`** (Part 1: the diagnostics
+  above; Part 2: the seed-variance study and ensembles below, both executed).
+
+### Seed-variance study and ensembles (changes how every earlier comparison should be read)
+
+v4 14-feature U-Net CV recipe retrained with seeds 1 and 2 on folds 2016/2020/2024
+(seed 0 = the existing v4 CV model); scripts `scripts/run_seed_study.sh`,
+`scripts/seed_study_eval.py`, `scripts/ensemble_followup.py` (`cross_validate_year.py`
+gained `--seed`); results in `models/seed_study/`. Predictions were pre-registered in the
+notebook before results.
+
+- **Seed noise is about as large as the signal in every single-seed comparison made so
+  far.** Within a fold, AUC-PR of the *identical* recipe varies by a mean CV of **24%**
+  across seeds (16-34%); max-min range is 32-69% of the fold mean (2024: 0.0638 / 0.0307 /
+  0.0501). Pooled seed SD 0.0110 (27.9% of mean); excluding seed 0 (the member affected
+  by fold selection) gives 26.5%. Estimated from 3 folds x 3 seeds (6 d.f.; 95% interval
+  on the SD ~0.64x-2.2x), and the folds were selected for large v4-vs-old gaps.
+- **Detectability:** a single-seed, 12-fold paired comparison can only detect an effect of
+  ~**32%** (80% power); 3 seeds per fold ~18%. About half of the observed fold-to-fold
+  variance of the single-seed 12-fold CV (SD 0.0149) may be seed noise (implied true
+  between-fold SD ~0.010).
+- **v4 vs. old, re-read:** seed 0's apparent +33% / -26% / +36% vs. the old model on the
+  three folds becomes +7% / -23% / +3% (mean -4.4%) with the 3-seed v4 mean -- the per-fold
+  swings were largely seed luck; the 12-fold null stands.
+- **Ensembling (mean predicted probability) is the largest gain found in this project.**
+  3-seed ensemble vs. the mean single seed: AUC-PR **+36%** (+33/+45/+30% per fold), best-F1
+  +23%, map AUC-ROC +3.5%; it matches or beats the best single seed in 2 of 3 folds
+  (+6/+23/-2%). **Across all 12 folds, the old+v4-seed-0 two-model ensemble scores AUC-PR
+  0.0532 vs. 0.0461 (old) / 0.0442 (v4)** -- +18% over the mean of its members, beats both
+  members in 12/12 folds, paired p=0.0002 / 0.0016; best-F1 0.124 vs 0.114/0.115.
+- **Old-recipe and v4-recipe models are exchangeable:** pair-ensemble gain is +26.0%
+  (old+seed) vs. +26.5% (seed+seed) (9 pairs each), reinforcing that the quiet-data
+  expansion changed nothing detectable.
+- **What this does to earlier conclusions (unresolved, not wrong):** single-seed rankings
+  within about +/-30% -- the alpha sweep, the architecture-widening ladder (+12% to +37%
+  steps), UH ablations (single split + single seed), v4 vs. old, and Part 1's map-level and
+  false-alarm comparisons (quiet-date false-alarm rate has a seed CV of ~53%) -- are inside
+  the noise band and cannot be called findings without repeats. Large effects survive:
+  U-Net vs. GBT (2.1-2.9x), U-Net vs. physics baselines (~3-4x) and climatology (~30x).
+  The calendar-year skill trend should be re-checked on ensembles (single-seed trend r=0.79;
+  2-model ensemble r=0.86).
+- **Instability vs. metric noise (day-block bootstrap, `scripts/bootstrap_stability.py`,
+  `scripts/ensemble_stability.py`; notebook Part 3; decision rule written before looking):
+  the models are genuinely unstable -- not "stable".** Resampling the test *dates* with
+  one fixed model moves a year's AUC-PR by ~16% (relative SD; ~+/-30% 95% intervals; 2014's
+  95 days far noisier) -- this metric noise is real and is NOT reduced by ensembling. But the
+  seed spread (CV 16-34%) is larger and survives resampling (mean seed CV under resampling
+  23/18/35%), and **7 of 9 seed pairs differ beyond day-resampling noise** (most with the
+  same sign in all 2,000 resamples); old vs. v4-seed-0 differs significantly in 7/12 folds
+  with mixed signs (3 +, 4 -), i.e. instability not a data effect. Exceptions: 2016 seed 1 vs 2
+  and 2020 seed 0 vs 2 are within noise (2020's per-model sampling noise is ~30%).
+- **Ensembles halve the instability but 2 members are not "stable":** disjoint 2-member
+  ensembles disagree by ~13% vs. ~27% for single-model pairs (differ beyond noise in 4/9 vs
+  12/18; one 2020 split still differs by 33%). The 2-model old+v4 ensemble beats each member
+  beyond resampling noise in 8-9 of 12 folds and is never significantly worse. Caveats: days
+  resampled as independent (consecutive-day correlation makes intervals somewhat too narrow);
+  float16-quantized scores; ensemble stability measured only at 2 members.
+- **Plan implied:** keep ensembling as the baseline (only thing tested that reduces model
+  variance) but use more members (>=5 is a reasonable target; the number needed is untested);
+  report 12-fold pooled means with bootstrap intervals, not single years; consider reducing
+  instability at the source (EMA/SWA weight averaging, LR decay, earlier stopping -- loss
+  flattened by ~epoch 5 in earlier runs -- gentler loss); verify with two disjoint 3-member
+  ensembles (3 more seeds on the 3 seed folds, ~7h).
+- **Ensemble-size study (notebook Part 4; seeds 3/4/5 added on folds 2016/2020/2024 ->
+  six seeds per fold; `scripts/ensemble_size.py`, results `models/seed_study/ensemble_size.json`).**
+  Disjoint-ensemble disagreement (mean relative AUC-PR gap) falls **25.5% (single) -> 13.0% (2
+  members) -> 9.5% (3 members)**; the share of splits differing beyond day-resampling noise falls
+  56% -> 33% -> 20% (2024 alone: 50% at k=3). **Pre-registered criterion (gap <=8% AND <=20% of
+  splits beyond noise) is narrowly NOT met at 3 members** (gap 9.5%). Gap x size is roughly constant
+  (25.5/26.0/28.5), so by extrapolation (NOT a direct test -- disjoint splits stop at 3+3 with six
+  seeds) 4 members ~6-7%, 5-6 members ~4-5%.
+- **Accuracy vs. size:** mean gain over a single seed +22% (2), +30% (3), +35% (4), +37% (5), +39%
+  (6); marginal gain of the k-th member +22%, +6.8%, +3.4%, +2.0%, +1.3% -- 5 members capture ~95% of
+  the gain in this pool. Test-sampling noise is identical at every ensemble size (~19% bootstrap rel.
+  SD): ensembling reduces model variance only. 6-seed ensembles: AUC-PR 0.042 / 0.062 / 0.070
+  (2016/2020/2024), +6-12% over the 3-seed ensemble and +19% to +54% over the original single-seed CV
+  models; each still has wide day-bootstrap intervals (+/-25-45% relative). All four pre-registered
+  predictions held (6-member gain 39% vs. predicted 40-45%, marginally under).
+- **Decision (per the rule written beforehand): use a >=5-member ensemble as the project baseline;
+  variance reduction at the source (EMA/SWA, LR decay, earlier stopping) is the next experiment.**
+  A 12-fold 5-member baseline would cost ~22-25h CPU (the old and v4-seed-0 models already give 2
+  members per fold and were found exchangeable).
+- **Weight-averaging (EMA) study (notebook Part 5; `training.train_model(ema_decays=...)`, default off, tests
+  verify tracking the average does not change training; `cross_validate_year.py --ema-decays`;
+  `scripts/run_ema_study.sh`, `scripts/ema_eval.py`, results `models/ema_study/ema_eval.json`).** Seeds 10/11/12
+  on folds 2016/2020/2024; plain and averaged weights saved from the same run (paired). **Pre-registered
+  outcome "works" for EMA decay 0.9999 (~4-epoch horizon):** C1 seed CV 10.4% -> 3.7% (ratio 0.36) PASS;
+  C2 pooled AUC-PR +2.9% PASS; C4 disjoint-pair gap 12.7% -> 4.7% (ratio 0.37; pairs beyond test noise
+  4/9 -> 0/9) PASS; **C3 FAIL (EMA >= raw in only 5/9 runs, threshold 6)** -- averaging moves models toward a common
+  value (per-run changes -15% to +19%) rather than improving each one. EMA 0.999 (~0.4-epoch horizon) mostly
+  does not help (CV 10.4% -> 7.7%). Prediction check: I predicted "partial"; the paired result was stronger.
+- **RECALIBRATION (supersedes the ~24% / ~32% figures above and in Part 2-3 text):** pooled over **nine plain
+  seeds per fold** (0-5, 10-12), plain-model seed spread of AUC-PR is **~19%** (18.8%; 19.5% excluding the
+  selection-affected seed 0), not ~24-28%: the first estimate used 3 seeds on folds selected for large v4-vs-old
+  gaps, and 3-seed CVs range 9%-34% across seed groups. Minimum detectable effect for a 12-fold paired
+  comparison: ~21% with one seed per fold, ~12% with three. About a third (not half) of the single-seed 12-fold CV
+  variance is seed noise.
+- **Direct 4-member plain-ensemble test (8 unselected seeds 1-5,10-12; `scripts/ensemble_size.py --extra-raw-seeds
+  10 11 12 --exclude-s0 --max-k 4`, `models/seed_study/ensemble_size_8seeds.json`): near miss, and my extrapolation
+  was too optimistic.** Disjoint plain ensembles disagree by 22.5% / 11.3% / 9.2% / 8.2% at 1/2/3/4 members, with
+  50% / 30% / 26% / 25% of splits beyond test noise (2024 ~49% at k=4) -- the gap flattens, not 1/k. Gain over a
+  single seed +19% / +25% / +29% at 2/3/4 members and +33-36% for all 8 (the earlier 6-seed figures
+  +22/+30/+35/+37/+39% and the "5 members capture ~95%" statement were relative to that small pool and slightly
+  high). A single EMA(0.9999) model's paired stability (ratio 0.37 -> ~8% when scaled to the pool's 22.5%) is
+  roughly that of a 4-member plain ensemble, from one model (a scaled comparison, not a direct test).
+- **Decision:** adopt EMA(0.9999) for every ensemble member (negligible cost). Untested: whether 3 EMA members
+  meet the stability criterion (needs six EMA models per fold for a disjoint 3-vs-3 test: seeds 13-15 with
+  EMA, ~7h). Plain ensembles need >=5 and still sit near the criterion at 4.
+- **Averaged-ensemble stability test (notebook Part 6; seeds 13/14/15 with EMA 0.9999 added on folds
+  2016/2020/2024 -> six averaged and six plain models per fold from the same runs, seeds 10-15;
+  `scripts/ema_eval.py --seeds 10..15`, `scripts/ensemble_size.py --emastudy-variant {raw,ema0.9999}`; outputs
+  `models/ema_study/ema_eval_6seeds.json`, `ens_size_6seeds_{raw,ema0.9999}.json`).** Disjoint-ensemble
+  criterion (gap <=8% AND <=20% of splits beyond day-resampling noise), pooled over 3 folds:
+  **averaged 3-vs-3 MEETS it (gap 6.9%, 6/30 = 20.0% beyond noise -- exactly at the line); plain 3-vs-3 does not
+  (8.5%, 8/30 = 26.7%).** Averaged 1v1 12.7% / 2v2 7.4% (24% beyond noise, fails); plain 1v1 19.5% / 2v2 9.7%.
+  Accuracy ceiling NOT raised: 6-model ensemble AUC-PR averaged 0.042/0.060/0.076 vs plain 0.045/0.065/0.073
+  (pooled ratio 0.973); averaged ensembles gain less from ensembling (3-member +21/+16/+20% vs plain +27/+26/+23%).
+  Predictions: 1v1 gap 5-8% NOT confirmed (12.7%); 3v3 result confirmed (narrowly); ceiling within +/-5% only pooled;
+  smaller ensembling gain confirmed in direction.
+- **REVISED Part 5 verdict ("works" -> "partial"), from re-evaluating EMA 0.9999 vs plain on 18 runs (six seeds
+  per fold):** seed CV 16.3% -> 10.8% (ratio 0.66; C1 FAIL), pair gap 19.5% -> 12.7% (ratio 0.65; C4 FAIL), pooled
+  AUC-PR +5.5% (C2 pass), EMA >= plain in 13/18 runs (C3 pass), single-model pairs beyond test noise 17/45 plain
+  vs 16/45 averaged (no difference). The 9-run ratios (0.36/0.37; 4/9 -> 0/9) were optimistic -- seeds 13-15 added
+  low outliers; a 3-seed spread estimate is unreliable (flagged at the time, now borne out). I originally
+  predicted "partial".
+- **Decision (updated):** use averaged (EMA 0.9999) members; 3 averaged members is the minimum that meets the bar
+  (thin margin, thresholds are my choice), 4-5 for a safety margin; expect no higher accuracy ceiling than a plain
+  ensemble of the same size. Cost of a 12-fold baseline: the 9 folds without averaged models need fresh training
+  (plain old/v4 models cannot be converted): 3 members ~27 trainings (~21h), 5 members ~45 (~36h).
+- **Pitfall found during the UH re-test setup (feature channel order):** `DenseGridDataset` takes channel order from the
+  variable order of the *first staged run* in the combined set, and staged files from different sources order their
+  variables differently (UH columns come after shear in the `scaled_build_v3` augmented copies but before it in
+  natively pulled files). So a train set and a test set built from the same merged staging can disagree on channel order
+  (the 14-feature studies are unaffected: with UH dropped the order is identical). `inference.assert_feature_order_matches`
+  caught this in `uh_eval.py` (which sorts runs; the CV script builds its run list in manifest order). Checked directly
+  for seed 10 / fold 2016: the CV script's own in-script AUC-PR (0.0326 plain / 0.0366 averaged) equals the correctly
+  aligned value, whereas swapped channels would give 0.0293 / 0.0305 -- so the UH runs' in-script numbers were valid, but only
+  by luck of ordering. `cross_validate_year.py` now aligns the test set to the training order (a no-op when they match) and
+  `uh_eval.py` aligns each model's scoring set to its checkpoint's order, then asserts. Training itself was never affected.
+- **UH re-test with averaged ensembles (in progress, notebook Part 7):** UH 2-5 km only (14 base + `uh_2_5km`
+  mean/max = 16 features), EMA 0.9999, seeds 10-12, folds 2016/2020/2024 (`scripts/run_uh_study.sh`, ~8h;
+  evaluation `scripts/uh_eval.py` -> `models/uh_study/uh_eval.json`), trained on the same 4,919 runs/splits as the
+  baseline averaged models (`models/ema_study/`, seeds 10-15), so only the UH features differ. Compares the UH
+  3-member ensemble to the 20 possible 3-member baseline ensembles. Pre-registered: hurts if E<=-10% and below the
+  baseline-triple p10 in >=2/3 folds; helps if E>=+10% and above p90 in >=2/3; else "no detectable effect" (keep 14
+  features). Predicted: no detectable effect; Cohen's d higher for UH in >=2/3 folds.
+- **Working rules going forward:** report ensembles (>=3 seeds) as the headline model and
+  cite single-seed AUC-PR only with a +/-25% caveat; require >=3 seeds per configuration
+  (or ensemble-vs-ensemble) before treating any comparison as a finding. Cited performance
+  for the 14-feature U-Net: single seed ~0.044-0.049 (+/-25%); 2-model ensemble 0.053 (12
+  folds). Not measured: ensemble-vs-ensemble variance, weighted/calibrated ensembling,
+  seed sensitivity of other architectures.
+- **Open caveats:** these are each model's own best-F1 thresholds, 12 single-seed
+  folds, v4 test years only; baselines were not re-scored under dilation or per
+  stratum.
+
 ### Validation against a documented case
 
 `scripts/validate_documented_case.py` spot-checks the grid/time-bin/

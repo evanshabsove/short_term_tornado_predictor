@@ -84,7 +84,7 @@ def summarize(results: list[dict]) -> dict:
     }
 
 
-def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, scratch_dir: Path, out_dir: Path, epochs: int) -> dict:
+def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, scratch_dir: Path, out_dir: Path, epochs: int, drop_columns: list[str] | None = None, seed: int = SEED, ema_decays: tuple[float, ...] = ()) -> dict:
     train_runs, test_runs = split_run_bins_year_holdout(run_bins, held_out_year, buffer_hours=BUFFER_HOURS)
 
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -92,22 +92,45 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
     scratch_test = scratch_dir / f"test_heldout_{held_out_year}.nc"
 
     try:
-        combine_staged_runs(staging_dir, train_runs).to_netcdf(scratch_train)
-        combine_staged_runs(staging_dir, test_runs).to_netcdf(scratch_test)
+        combine_staged_runs(staging_dir, train_runs).drop_vars(drop_columns or [], errors="ignore").to_netcdf(scratch_train)
+        combine_staged_runs(staging_dir, test_runs).drop_vars(drop_columns or [], errors="ignore").to_netcdf(scratch_test)
 
         train_ds = DenseGridDataset(str(scratch_train))
         test_ds = DenseGridDataset(str(scratch_test))
+        # Channel order follows the FIRST staged run of each combined set, and staged files from different sources order their
+        # variables differently (e.g. UH columns sit after shear in the *_v3 augmented copies but before it in natively-pulled
+        # files), so train and test can disagree. Align the test set to the training order so evaluation feeds the model the
+        # channels it was trained on. (A no-op whenever the orders already match, e.g. every 14-feature study.)
+        if test_ds.feature_names != train_ds.feature_names:
+            assert set(test_ds.feature_names) == set(train_ds.feature_names), "train/test feature sets differ"
+            idx = [test_ds.feature_names.index(n) for n in train_ds.feature_names]
+            test_ds.X = test_ds.X[:, idx]
+            test_ds.feature_names = list(train_ds.feature_names)
+            print("  (aligned test-set channel order to the training set's)", flush=True)
         print(f"  train: {len(train_ds)} ({int(train_ds.is_active.sum())} active) | "
               f"test (held-out {held_out_year}): {len(test_ds)} ({int(test_ds.is_active.sum())} active)")
 
         t0 = time.time()
-        torch.manual_seed(SEED)
+        torch.manual_seed(seed)
         model = TornadoUNet(in_channels=len(train_ds.feature_names), base_channels=BASE_CHANNELS)
         train_result = train_model(
             train_ds, model, val_dataset=test_ds, epochs=epochs, batch_size=BATCH_SIZE,
-            lr=LR, alpha=ALPHA, gamma=GAMMA, quiet_keep_fraction=QUIET_KEEP_FRACTION, seed=SEED,
+            lr=LR, alpha=ALPHA, gamma=GAMMA, quiet_keep_fraction=QUIET_KEEP_FRACTION, seed=seed, ema_decays=tuple(ema_decays),
         )
         metrics = evaluate_model(model, test_ds, include_curves=False)
+        ema_metrics = {}
+        for decay, sd in train_result.get("ema_state_dicts", {}).items():
+            ema_model = TornadoUNet(in_channels=len(train_ds.feature_names), base_channels=BASE_CHANNELS)
+            ema_model.load_state_dict(sd)
+            ema_model.eval()
+            ema_metrics[str(decay)] = evaluate_model(ema_model, test_ds, include_curves=False)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            torch.save({
+                "model_class": "TornadoUNet", "model_state_dict": sd, "ema_decay": decay,
+                "training_hyperparameters": train_result["hyperparameters"],
+                "model_hyperparameters": {"in_channels": len(train_ds.feature_names), "base_channels": BASE_CHANNELS},
+                "feature_names": train_ds.feature_names,
+            }, out_dir / f"tornado_unet_heldout_{held_out_year}_ema{decay}.pt")
         elapsed = time.time() - t0
 
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -124,6 +147,7 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
 
         return {
             "held_out_year": held_out_year,
+            "seed": seed,
             "n_train": len(train_ds),
             "n_train_active": int(train_ds.is_active.sum()),
             "n_test": len(test_ds),
@@ -133,6 +157,7 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
             "final_train_loss": train_result["loss_history"][-1],
             "final_val_loss": train_result["val_loss_history"][-1],
             "checkpoint": str(ckpt_path),
+            **({"ema_metrics": ema_metrics} if ema_metrics else {}),
             **metrics,
         }
     finally:
@@ -148,6 +173,9 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--results", type=Path, default=DEFAULT_RESULTS_PATH)
     parser.add_argument("--epochs", type=int, default=EPOCHS)
+    parser.add_argument("--ema-decays", type=float, nargs="*", default=[], help="also track an exponential moving average of the weights at each decay; saves tornado_unet_heldout_<year>_ema<decay>.pt and reports ema_metrics (the plain model is saved/evaluated as always)")
+    parser.add_argument("--seed", type=int, default=SEED, help="seeds both model init (torch.manual_seed) and train_model's quiet-map sampling/shuffling; use a separate --out-dir/--results per seed")
+    parser.add_argument("--drop-columns", nargs="+", default=None, help="variables to drop from each fold's combined data (e.g. the UH columns, which are NaN-filled for runs staged without them)")
     parser.add_argument("--years", type=int, nargs="+", default=None, help="restrict to these held-out years (default: every year present in the manifest)")
     args = parser.parse_args()
 
@@ -164,7 +192,7 @@ def main() -> None:
             print(f"\n=== held-out year {year}: already done, skipping ===")
             continue
         print(f"\n=== held-out year {year} ===")
-        fold_result = run_one_fold(year, run_bins, args.staging_dir, args.scratch_dir, args.out_dir, args.epochs)
+        fold_result = run_one_fold(year, run_bins, args.staging_dir, args.scratch_dir, args.out_dir, args.epochs, args.drop_columns, args.seed, tuple(args.ema_decays))
         print(f"  AUC-PR={fold_result['auc_pr']:.4f} AUC-ROC={fold_result['auc_roc']:.4f} "
               f"cohens_d={fold_result['cohens_d']:.2f}  ({fold_result['elapsed_sec']:.0f}s)")
         results.append(fold_result)

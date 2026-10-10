@@ -264,3 +264,47 @@ def test_train_model_without_val_dataset_omits_val_loss_history(tmp_path):
     result = train_model(dataset, model, epochs=2, batch_size=2, seed=0)
 
     assert "val_loss_history" not in result
+
+
+# --- optional EMA of weights ---
+
+
+def test_train_model_ema_is_off_by_default(tmp_path):
+    path, _, _ = _tiny_synthetic_nc(tmp_path, n_samples=6, n_active=3)
+    torch.manual_seed(0)
+    result = train_model(DenseGridDataset(str(path)), TornadoCNN(in_channels=2, hidden_channels=4), epochs=2, batch_size=2, quiet_keep_fraction=0.5, seed=0)
+    assert "ema_state_dicts" not in result
+    assert "ema_decays" not in result["hyperparameters"]
+
+
+def test_train_model_ema_does_not_change_training_and_zero_decay_equals_final_weights(tmp_path):
+    path, _, _ = _tiny_synthetic_nc(tmp_path, n_samples=6, n_active=3)
+
+    def run(**kw):
+        torch.manual_seed(0)
+        model = TornadoCNN(in_channels=2, hidden_channels=4)
+        result = train_model(DenseGridDataset(str(path)), model, epochs=3, batch_size=2, quiet_keep_fraction=0.5, seed=0, **kw)
+        return model, result
+
+    m_plain, r_plain = run()
+    m_ema, r_ema = run(ema_decays=(0.0, 0.99))
+    assert r_plain["loss_history"] == r_ema["loss_history"]  # tracking the average must not alter training
+    for k, v in m_plain.state_dict().items():
+        assert torch.equal(v, m_ema.state_dict()[k])
+    sd0 = r_ema["ema_state_dicts"][0.0]
+    for k, v in m_ema.state_dict().items():  # decay 0 -> the average is just the latest weights
+        assert torch.allclose(sd0[k], v)
+    sd99 = r_ema["ema_state_dicts"][0.99]
+    assert any(not torch.allclose(sd99[k], v) for k, v in m_ema.state_dict().items())  # a real average differs from the iterate
+    fresh = TornadoCNN(in_channels=2, hidden_channels=4)
+    fresh.load_state_dict(sd99)  # loadable into a fresh model
+
+
+def test_train_model_ema_decay_one_stays_at_init(tmp_path):
+    path, _, _ = _tiny_synthetic_nc(tmp_path, n_samples=6, n_active=3)
+    torch.manual_seed(0)
+    model = TornadoCNN(in_channels=2, hidden_channels=4)
+    init = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    result = train_model(DenseGridDataset(str(path)), model, epochs=2, batch_size=2, quiet_keep_fraction=0.5, seed=0, ema_decays=(1.0,))
+    for k, v in result["ema_state_dicts"][1.0].items():
+        assert torch.allclose(v, init[k])
