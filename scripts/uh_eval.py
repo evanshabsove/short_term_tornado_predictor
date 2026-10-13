@@ -37,11 +37,12 @@ MERGED = REPO / "data" / "interim" / "scaled_build_uh_merged"
 DROP = ["uh_0_2km_mean", "uh_0_2km_max", "uh_0_3km_mean", "uh_0_3km_max", "uh_layers_available"]
 VARIANTS = {"raw": "", "ema0.9999": "_ema0.9999"}
 BASE_SEEDS = (10, 11, 12, 13, 14, 15)
+TAG = "uhstudy"  # score-cache prefix; overridden by --tag
 
 
 def score_missing(year, seeds, run_bins):
     todo = [(v, s) for v, suf in VARIANTS.items() for s in seeds
-            if (UH_DIR / f"seed{s}" / f"tornado_unet_heldout_{year}{suf}.pt").exists() and not (dsm.CACHE / f"uhstudy_{v}_s{s}_{year}.npy").exists()]
+            if (UH_DIR / f"seed{s}" / f"tornado_unet_heldout_{year}{suf}.pt").exists() and not (dsm.CACHE / f"{TAG}_{v}_s{s}_{year}.npy").exists()]
     if not todo:
         return
     print(f"[score] {year}: {len(todo)} UH models", flush=True)
@@ -50,7 +51,7 @@ def score_missing(year, seeds, run_bins):
     meta = np.load(dsm.CACHE / f"meta_{year}.npz")
     init = pd.to_datetime(combined["init_time"].values).values.astype("datetime64[s]").astype("int64")
     assert np.array_equal(init, meta["init_time"]), "test-sample order differs from cached diag scores"
-    path = dsm.SCRATCH / f"uhstudy_test_{year}.nc"
+    path = dsm.SCRATCH / f"{TAG}_test_{year}.nc"
     try:
         combined.drop_vars(DROP, errors="ignore").to_netcdf(path)
         ds = DenseGridDataset(str(path))
@@ -63,7 +64,7 @@ def score_missing(year, seeds, run_bins):
                 ds.feature_names = list(c["feature_names"])
             assert_feature_order_matches(ds.feature_names, c)
             sc, _ = get_proba_labels(model, ds)
-            np.save(dsm.CACHE / f"uhstudy_{v}_s{s}_{year}.npy", sc.reshape(len(ds), 81, 138).astype("float16"))
+            np.save(dsm.CACHE / f"{TAG}_{v}_s{s}_{year}.npy", sc.reshape(len(ds), 81, 138).astype("float16"))
     finally:
         path.unlink(missing_ok=True)
 
@@ -81,8 +82,19 @@ def main():
     ap.add_argument("--years", type=int, nargs="+", default=list(bs.SEED_FOLDS))
     ap.add_argument("--seeds", type=int, nargs="+", default=[10, 11, 12])
     ap.add_argument("--boots", type=int, default=1000)
-    ap.add_argument("--out", type=Path, default=UH_DIR / "uh_eval.json")
+    ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--study-dir", type=Path, default=None, help="directory with seed*/ checkpoints (default models/uh_study)")
+    ap.add_argument("--keep-uh-columns", action="store_true", help="score with ALL UH columns kept (the 21-feature study, scripts/run_uh21_study.sh)")
+    ap.add_argument("--tag", default="uhstudy", help="score-cache prefix, so different studies do not share cached scores")
     args = ap.parse_args()
+    global UH_DIR, DROP, TAG
+    TAG = args.tag
+    if args.study_dir is not None:
+        UH_DIR = args.study_dir
+    if args.keep_uh_columns:
+        DROP = []
+    if args.out is None:
+        args.out = UH_DIR / "uh_eval.json"
     manifest = load_manifest(MERGED / "manifest.json")
     run_bins = [(pd.Timestamp(k), b) for k, v in sorted(manifest.items()) if v["status"] == "done" for b in range(N_BINS)]
     rng = np.random.default_rng(4)
@@ -97,8 +109,8 @@ def main():
         days, day_idx = np.unique(meta["init_time"] // 86400, return_inverse=True)
         D = len(days)
         W = np.stack([np.bincount(rng.integers(0, D, D), minlength=D) for _ in range(args.boots)]).astype(np.float64)
-        UH = {s: np.load(dsm.CACHE / f"uhstudy_ema0.9999_s{s}_{year}.npy").astype(np.float32) for s in args.seeds if (dsm.CACHE / f"uhstudy_ema0.9999_s{s}_{year}.npy").exists()}
-        UHraw = {s: np.load(dsm.CACHE / f"uhstudy_raw_s{s}_{year}.npy").astype(np.float32) for s in args.seeds if (dsm.CACHE / f"uhstudy_raw_s{s}_{year}.npy").exists()}
+        UH = {s: np.load(dsm.CACHE / f"{TAG}_ema0.9999_s{s}_{year}.npy").astype(np.float32) for s in args.seeds if (dsm.CACHE / f"{TAG}_ema0.9999_s{s}_{year}.npy").exists()}
+        UHraw = {s: np.load(dsm.CACHE / f"{TAG}_raw_s{s}_{year}.npy").astype(np.float32) for s in args.seeds if (dsm.CACHE / f"{TAG}_raw_s{s}_{year}.npy").exists()}
         BASE = {s: np.load(dsm.CACHE / f"emastudy_ema0.9999_s{s}_{year}.npy").astype(np.float32) for s in BASE_SEEDS}
         def ap_boot(score):
             t = bs.build_table(score, y, day_idx, D)

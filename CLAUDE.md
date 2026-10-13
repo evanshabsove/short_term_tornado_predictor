@@ -971,6 +971,8 @@ this dataset's size easily).
 
 ### Updraft helicity features (Tier 1 roadmap, ticket 1) — did not help
 
+> **SUPERSEDED IN PART (see "UH re-test with averaged ensembles" below, notebook Part 7):** the result below was a single seed on a single split; with ~19% seed noise it is not a reliable negative. The multi-seed averaged-ensemble re-test found no detectable pooled effect of UH 2-5 km, and the Cohen's d / AUC-PR divergence described here did not replicate. Kept as recorded at the time.
+
 The data pull (section above, `scripts/augment_dataset_fields.py`)
 finished successfully: 3,182 of 3,183 runs augmented (one sustained
 network outage mid-job cost 851 runs, recovered via `--retry-failed`
@@ -1400,13 +1402,33 @@ notebook before results.
   aligned value, whereas swapped channels would give 0.0293 / 0.0305 -- so the UH runs' in-script numbers were valid, but only
   by luck of ordering. `cross_validate_year.py` now aligns the test set to the training order (a no-op when they match) and
   `uh_eval.py` aligns each model's scoring set to its checkpoint's order, then asserts. Training itself was never affected.
-- **UH re-test with averaged ensembles (in progress, notebook Part 7):** UH 2-5 km only (14 base + `uh_2_5km`
-  mean/max = 16 features), EMA 0.9999, seeds 10-12, folds 2016/2020/2024 (`scripts/run_uh_study.sh`, ~8h;
-  evaluation `scripts/uh_eval.py` -> `models/uh_study/uh_eval.json`), trained on the same 4,919 runs/splits as the
-  baseline averaged models (`models/ema_study/`, seeds 10-15), so only the UH features differ. Compares the UH
-  3-member ensemble to the 20 possible 3-member baseline ensembles. Pre-registered: hurts if E<=-10% and below the
-  baseline-triple p10 in >=2/3 folds; helps if E>=+10% and above p90 in >=2/3; else "no detectable effect" (keep 14
-  features). Predicted: no detectable effect; Cohen's d higher for UH in >=2/3 folds.
+- **UH re-test with averaged ensembles (notebook Part 7; UH 2-5 km only = 14 base + `uh_2_5km` mean/max = 16 features,
+  EMA 0.9999, seeds 10-12, folds 2016/2020/2024; `scripts/run_uh_study.sh`, `scripts/uh_eval.py`, exploratory
+  `scripts/uh_pairs_exploratory.py`; results `models/uh_study/uh_eval.json`, `uh_pairs_exploratory.json`) -- trained on the
+  same 4,919 runs/splits as the baseline averaged models, so only the UH features differ. The original "UH hurts" result is
+  NOT reproduced.** Pre-registered rule outcome: **no detectable pooled effect** (E = +0.3%; neither "hurts" nor "helps"
+  met). Per fold the UH 3-member ensemble vs. the 20 baseline 3-member ensembles: **2016 +12.6%** (z=+2.7, above all 20, paired
+  interval excludes 0; every UH single and pair beats baseline), **2020 +5.7%** (95th pct, n.s.), **2024 -17.5%** (z=-4.4, below
+  all 20, paired interval excludes 0) -- but the 2024 loss is driven by ONE weak member (UH seed 11, AUC-PR 0.027 vs ~0.06 for
+  the other two); the pair without it scores 0.0687 vs baseline 0.0690 (-0.4%) (exploratory, post hoc). A pooled zero is an
+  average of opposite fold-level results; hypothesis (untested): UH from older HRRR versions carries signal that does not
+  transfer to the HRRR-v4-era 2024 fold. Predictions: (1) no pooled effect confirmed, not per fold; (2) "slightly negative"
+  not confirmed; (3) **Cohen's d higher for UH in >=2/3 folds NOT confirmed (1/3: +0.8%, -3.8%, -8.1%) -- the old "mean
+  separation rises while AUC-PR does not" pattern did not replicate**; (4) secondary metrics partly within 10%.
+  **Decision (per the pre-registered rule): stop; keep the 14 base features** (UH not shown to matter, may help in earlier
+  years). Not tested: 0-2/0-3 km UH layers and the full 21-feature set. If revisited: 3 more UH seeds on 2016/2024 (6 vs 6) and
+  the HRRR-v4-era folds (2022-2025).
+- **UH testing finished (notebook Part 8; 3 more UH 2-5 km seeds 13-15 -> 6 UH vs the 6 baseline averaged models, plus the full 21-feature
+  set (all UH layers, 0-2/0-3 km zero-filled + `uh_layers_available`), seeds 10-12; folds 2016/2020/2024; `scripts/run_uh_all.sh`,
+  `scripts/run_uh21_study.sh`, `scripts/run_uh_part8_eval.sh`, `scripts/uh_eval.py --study-dir/--keep-uh-columns/--tag`; results
+  `models/uh_study/uh_eval_6seeds.json`, `uh_eval_13_15.json`, `models/uh21_study/uh21_eval.json`).** Pre-registered rule outcome for both:
+  **no detectable effect** (8A 6v6 pooled +4.4%, folds +9.5/+10.1/-6.3%; new seeds alone +7.1/+4.0/+1.0%; 8B 21 features +1.0%, folds
+  +10.0/+1.3/-8.2%; "helps" needed pooled >= +8%). **Part 7's fold-level results do not hold up:** the 2024 -17.5% came from one weak UH
+  member (seed 11); with three more seeds 2024 is +1.0% (new seeds) / -6.3% (all 6), and 2016's +12.6% shrinks to +7-10% with intervals
+  including 0. Seed 11 is weak on 2024 in both UH variants (0.027, 0.033) but not in the baseline (0.063) -- unexplained. The 0-2/0-3 km layers
+  add nothing detectable over 2-5 km (-2%/-4%/+11% from one weak seed). Cohen's d is the same for UH and baseline ensembles. **UH testing is closed;
+  keep the 14 base features.** Untested: HRRR-v4-era folds 2022-2025 (older folds lean slightly positive, 2024 slightly negative -- hypothesis only),
+  other UH treatments.
 - **Working rules going forward:** report ensembles (>=3 seeds) as the headline model and
   cite single-seed AUC-PR only with a +/-25% caveat; require >=3 seeds per configuration
   (or ensemble-vs-ensemble) before treating any comparison as a finding. Cited performance
@@ -1763,7 +1785,7 @@ driver of the regression: test AUC-PR only recovered to 0.0528, still
 recurring Cohen's d/AUC-PR divergence across three unrelated
 experiments is itself the most actionable finding from this whole
 round: trust AUC-PR, not mean-separation metrics, for every future
-decision here.
+decision here. *(Note: the UH instance of this pattern did not replicate in the multi-seed re-test, and the alpha-sweep instance is single-seed; "trust AUC-PR" remains sound, but treat "recurring divergence" as less certain than written.)*
 
 A **12-fold leave-one-year-out cross-validation** (see "Year-holdout
 cross-validation" above) resolved the val/test instability directly:
