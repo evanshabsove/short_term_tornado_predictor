@@ -1710,6 +1710,54 @@ train/val without leakage, via `scripts/02_dataset_build/build_training_dataset.
   cost/imbalance, not appropriate for evaluation) — restores whatever
   `model.training`/`model.eval()` state the caller had before it ran.
 
+### Country mask and Canadian coverage (Canada-transfer groundwork, not a modeling change)
+
+`scripts/08_canada_transfer/build_country_mask.py` classifies every coarse-grid
+cell by country, and quantifies how much of Canada the HRRR domain covers.
+Motivated by the long-term goal of extending to Canada (see memory: forecaster-aid
+tool, then Canada transfer). Output: `data/processed/hrrr_coarse_grid_stride13_countries.nc`;
+`scripts/08_canada_transfer/plot_country_mask.py` plots it (`outputs/country_mask.png`,
+grid-space, north-up); `tests/test_country_mask.py` spot-checks it (skipped if the
+gitignored mask is not built). Does not touch the grid, labels, features or any model.
+
+- **Method:** Natural Earth 1:10m admin-0 countries, **minus the 1:10m lakes layer**, in
+  the grid's own LCC meters. Cell-center point-in-polygon gives `country`
+  (0 water, 1 US, 2 CA, 3 MX, 4 other land); exact LCC-square intersection gives
+  `frac_{us,ca,mx,other_land,water}`; `straddles_border` / `straddles_coast` flag cells
+  with >= 2 land classes / land+water each above 1% of the cell (`--min-frac`).
+- **A real bug was caught and fixed:** the first build assumed Natural Earth's admin-0
+  polygons exclude the Great Lakes. They do not -- the border runs through the lake
+  middles -- so lake cells came out as US/Canada with water fraction 0. Caught by looking
+  at the plot (no blue lakes) and confirmed by probing mid-lake cells; fixed by subtracting
+  the lakes layer. Covered by tests so it cannot silently return.
+- **Counts (81x138 = 11,178 cells, after the fix):** water 4,121 (36.9%), US 5,148,
+  CA 1,243 (11.1%), MX 659, other land 7. 192 border-straddling and 1,305 coast-straddling
+  cells. 1,442 cells have any Canadian area (~1.91M km^2). Canadian cells span ~42.1-52.3N.
+  Before the fix these were water 3,895 / US 5,276 / CA 1,339 / MX 661.
+- **Northern coverage gap:** the domain's top row of cell centers is 47.6-52.3N (top edge
+  ~52.5N at its highest; it dips in the east because of LCC curvature), so everything north
+  of ~52N is outside. Share of each region's area inside the grid extent (not lake-adjusted):
+  PEI/New Brunswick 100%, Ontario 71%, Nova Scotia 65%, Saskatchewan 32%, Quebec 28.5%,
+  Manitoba 25%, Alberta 15%, BC 15%; Yukon, Nunavut, NWT, Newfoundland & Labrador 0%
+  (all of Canada 16.9%). **This is area coverage, not tornado-weighted coverage** -- no
+  Canadian tornado dataset is in the repo yet, so how much of Canada's actual tornado
+  climatology falls inside is unmeasured.
+- **Alberta caveat (from memory, NOT verified against data):** Alberta's tornado activity
+  is concentrated in the central part of the province (Calgary-Red Deer-Edmonton, ~51-53.5N).
+  Calgary is inside the domain, Red Deer is at the top edge, Edmonton (53.5N) is outside --
+  so the Alberta gap likely includes real tornado country, and cells within a few rows of the
+  top edge also have less spatial context for the U-Net's receptive field.
+- **Open concern, unverified:** SPC reports are believed to be US-only. If so, every
+  Canadian cell is labeled 0 on every sample, including when a Canadian tornado actually
+  occurred -- label noise on ~11% of the grid that penalizes the model for correctly
+  flagging Canadian tornado environments. Check the SPC CSV's state codes before relying on
+  this. Candidate fixes (not done): mask Canadian cells out of the loss/metrics (quick, uses
+  this mask), or add Northern Tornadoes Project / Environment Canada labels (proper).
+- **Next steps, not done:** quantify NTP/ECCC tornado counts inside vs. outside the grid and
+  by distance to the top edge; investigate Canadian NWP (HRDPS, RRFS) archive depth before any
+  model switch. An inquiry about NTP data access was sent to the Northern Tornadoes Project
+  (no reply recorded here).
+
 ## Current status
 
 Repo scaffolding, data collection, the spatial grid, time binning,
@@ -1803,6 +1851,7 @@ from HRRR's own forecast fields (motivated by the sibling `tornet`
 project's experience with pressure-change features) — both written up
 as Trello-style starter-prompt tickets rather than implemented yet.
 
+- A country mask and Canadian-coverage analysis for the coarse grid exists (see "Country mask and Canadian coverage" above): `data/processed/hrrr_coarse_grid_stride13_countries.nc`. 1,243 Canadian cells; HRRR domain stops ~52.5N, so central Alberta is at/over the edge.
 - SPC tornado reports (2014–2025) downloaded and parsed to
   `data/processed/spc_tornado_reports_2014_2025.csv` (15,294 reports),
   including full track geometry (`path_wkt`) — see
