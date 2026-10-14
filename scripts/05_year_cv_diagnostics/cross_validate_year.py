@@ -42,6 +42,7 @@ import pandas as pd
 import torch
 
 from tornado_predictor.build_scaled import combine_staged_runs, load_manifest
+from tornado_predictor.cell_mask import resolve_cell_mask
 from tornado_predictor.evaluate import evaluate_model
 from tornado_predictor.split import available_years, split_run_bins_year_holdout
 from tornado_predictor.time_bins import N_BINS
@@ -84,7 +85,8 @@ def summarize(results: list[dict]) -> dict:
     }
 
 
-def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, scratch_dir: Path, out_dir: Path, epochs: int, drop_columns: list[str] | None = None, seed: int = SEED, ema_decays: tuple[float, ...] = ()) -> dict:
+def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, scratch_dir: Path, out_dir: Path, epochs: int, drop_columns: list[str] | None = None, seed: int = SEED, ema_decays: tuple[float, ...] = (), cell_mask_name: str = "none") -> dict:
+    cell_mask = resolve_cell_mask(cell_mask_name)  # None for "none": loss and metrics over every cell, as always
     train_runs, test_runs = split_run_bins_year_holdout(run_bins, held_out_year, buffer_hours=BUFFER_HOURS)
 
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -116,14 +118,16 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
         train_result = train_model(
             train_ds, model, val_dataset=test_ds, epochs=epochs, batch_size=BATCH_SIZE,
             lr=LR, alpha=ALPHA, gamma=GAMMA, quiet_keep_fraction=QUIET_KEEP_FRACTION, seed=seed, ema_decays=tuple(ema_decays),
+            cell_mask=cell_mask,
         )
-        metrics = evaluate_model(model, test_ds, include_curves=False)
+        train_result["hyperparameters"]["cell_mask_name"] = cell_mask_name
+        metrics = evaluate_model(model, test_ds, include_curves=False, cell_mask=cell_mask)
         ema_metrics = {}
         for decay, sd in train_result.get("ema_state_dicts", {}).items():
             ema_model = TornadoUNet(in_channels=len(train_ds.feature_names), base_channels=BASE_CHANNELS)
             ema_model.load_state_dict(sd)
             ema_model.eval()
-            ema_metrics[str(decay)] = evaluate_model(ema_model, test_ds, include_curves=False)
+            ema_metrics[str(decay)] = evaluate_model(ema_model, test_ds, include_curves=False, cell_mask=cell_mask)
             out_dir.mkdir(parents=True, exist_ok=True)
             torch.save({
                 "model_class": "TornadoUNet", "model_state_dict": sd, "ema_decay": decay,
@@ -148,6 +152,7 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
         return {
             "held_out_year": held_out_year,
             "seed": seed,
+            "cell_mask": cell_mask_name,
             "n_train": len(train_ds),
             "n_train_active": int(train_ds.is_active.sum()),
             "n_test": len(test_ds),
@@ -176,6 +181,7 @@ def main() -> None:
     parser.add_argument("--ema-decays", type=float, nargs="*", default=[], help="also track an exponential moving average of the weights at each decay; saves tornado_unet_heldout_<year>_ema<decay>.pt and reports ema_metrics (the plain model is saved/evaluated as always)")
     parser.add_argument("--seed", type=int, default=SEED, help="seeds both model init (torch.manual_seed) and train_model's quiet-map sampling/shuffling; use a separate --out-dir/--results per seed")
     parser.add_argument("--drop-columns", nargs="+", default=None, help="variables to drop from each fold's combined data (e.g. the UH columns, which are NaN-filled for runs staged without them)")
+    parser.add_argument("--cell-mask", choices=["none", "us_trusted"], default="none", help="us_trusted: exclude Canada/Mexico/other-land cells (no SPC labels there) from the loss and the reported metrics; inputs keep the full grid. Default none = unchanged behavior")
     parser.add_argument("--years", type=int, nargs="+", default=None, help="restrict to these held-out years (default: every year present in the manifest)")
     args = parser.parse_args()
 
@@ -192,7 +198,7 @@ def main() -> None:
             print(f"\n=== held-out year {year}: already done, skipping ===")
             continue
         print(f"\n=== held-out year {year} ===")
-        fold_result = run_one_fold(year, run_bins, args.staging_dir, args.scratch_dir, args.out_dir, args.epochs, args.drop_columns, args.seed, tuple(args.ema_decays))
+        fold_result = run_one_fold(year, run_bins, args.staging_dir, args.scratch_dir, args.out_dir, args.epochs, args.drop_columns, args.seed, tuple(args.ema_decays), args.cell_mask)
         print(f"  AUC-PR={fold_result['auc_pr']:.4f} AUC-ROC={fold_result['auc_roc']:.4f} "
               f"cohens_d={fold_result['cohens_d']:.2f}  ({fold_result['elapsed_sec']:.0f}s)")
         results.append(fold_result)

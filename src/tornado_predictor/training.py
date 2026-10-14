@@ -55,13 +55,21 @@ class FocalLoss(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        """mask (optional, broadcastable to logits, e.g. (row, col)): 1 where a
+        cell's label is trustworthy, 0 where it should not contribute. Masked
+        cells are zeroed and the sum is divided by the TOTAL cell count (not
+        mask.sum()), so the loss scale -- and hence the effective learning rate --
+        matches the unmasked loss; only the excluded cells' contribution is
+        removed. mask=None is exactly the original behavior."""
         bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
         p = torch.sigmoid(logits)
         p_t = p * targets + (1 - p) * (1 - targets)
         alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
         loss = alpha_t * (1 - p_t) ** self.gamma * bce
-        return loss.mean()
+        if mask is None:
+            return loss.mean()
+        return (loss * mask).sum() / loss.numel()
 
 
 class DenseGridDataset(Dataset):
@@ -93,6 +101,15 @@ class DenseGridDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
+def masked_is_active(dataset: "DenseGridDataset", cell_mask: np.ndarray | None) -> np.ndarray:
+    """Per-sample 'active' flags counting only positives inside cell_mask (a map
+    whose only positive lies in an excluded cell is quiet for sampling purposes).
+    cell_mask=None returns dataset.is_active unchanged."""
+    if cell_mask is None:
+        return dataset.is_active
+    return (dataset.y * np.asarray(cell_mask, dtype="float32")).sum(axis=(1, 2)) > 0
+
+
 class QuietMapDownsampler(Sampler):
     """Keeps every active map but only a fraction of quiet ones,
     re-drawn each epoch (not a fixed subset) so the model sees
@@ -116,7 +133,7 @@ class QuietMapDownsampler(Sampler):
         return len(self.active_idx) + int(len(self.quiet_idx) * self.quiet_keep_fraction)
 
 
-def evaluate(dataset: DenseGridDataset, model: nn.Module, criterion: nn.Module, batch_size: int = 2) -> float:
+def evaluate(dataset: DenseGridDataset, model: nn.Module, criterion: nn.Module, batch_size: int = 2, cell_mask: torch.Tensor | None = None) -> float:
     """Mean loss over every sample in dataset, no gradient updates, no
     QuietMapDownsampler (a val set should be evaluated on in full, not
     downsampled -- downsampling exists only to manage training-time
@@ -127,7 +144,7 @@ def evaluate(dataset: DenseGridDataset, model: nn.Module, criterion: nn.Module, 
     with torch.no_grad():
         for X, y in DataLoader(dataset, batch_size=batch_size):
             logits = model(X).squeeze(1)
-            losses.append(criterion(logits, y).item())
+            losses.append((criterion(logits, y) if cell_mask is None else criterion(logits, y, cell_mask)).item())
     model.train(was_training)
     return float(np.mean(losses))
 
@@ -145,6 +162,7 @@ def train_model(
     quiet_keep_fraction: float = 0.2,
     seed: int = 0,
     ema_decays: tuple[float, ...] = (),
+    cell_mask: np.ndarray | None = None,
 ) -> dict:
     """Trains model on dataset with FocalLoss + QuietMapDownsampler
     (re-drawing its quiet-map subset each epoch, since DataLoader calls
@@ -164,6 +182,12 @@ def train_model(
     are averaged -- correct for the models here, which have no
     batch-norm running statistics or other buffers.
 
+    cell_mask (default None = off, behavior and results unchanged): a (row, col)
+    boolean array, True where labels are trustworthy (see cell_mask.py). False
+    cells contribute nothing to the training or validation loss, and positives
+    there do not make a map "active" for QuietMapDownsampler. Inputs are not
+    masked -- the model still sees the whole grid.
+
     val_dataset should come from split.split_run_bins -- a leakage-safe
     split, not an arbitrary held-out set -- and is evaluated on in full
     each epoch (see evaluate()), never used for gradient updates.
@@ -174,7 +198,8 @@ def train_model(
     end-to-end determinism. The sampler's randomness (which quiet maps
     get kept, and batch shuffling) is controlled independently via the
     seed argument, decoupled from torch's global RNG."""
-    sampler = QuietMapDownsampler(dataset.is_active, quiet_keep_fraction=quiet_keep_fraction, seed=seed)
+    mask_t = None if cell_mask is None else torch.as_tensor(np.asarray(cell_mask), dtype=torch.float32)
+    sampler = QuietMapDownsampler(masked_is_active(dataset, cell_mask), quiet_keep_fraction=quiet_keep_fraction, seed=seed)
     loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
     criterion = FocalLoss(alpha=alpha, gamma=gamma)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -187,7 +212,7 @@ def train_model(
         epoch_losses = []
         for X, y in loader:
             logits = model(X).squeeze(1)
-            loss = criterion(logits, y)
+            loss = criterion(logits, y) if mask_t is None else criterion(logits, y, mask_t)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -200,7 +225,7 @@ def train_model(
             epoch_losses.append(loss.item())
         loss_history.append(float(np.mean(epoch_losses)))
         if val_dataset is not None:
-            val_loss_history.append(evaluate(val_dataset, model, criterion, batch_size=batch_size))
+            val_loss_history.append(evaluate(val_dataset, model, criterion, batch_size=batch_size, cell_mask=mask_t))
 
     result = {
         "loss_history": loss_history,
@@ -214,6 +239,9 @@ def train_model(
             "seed": seed,
         },
     }
+    if cell_mask is not None:
+        result["hyperparameters"]["cell_mask_kept_cells"] = int(np.asarray(cell_mask).sum())
+        result["hyperparameters"]["cell_mask_total_cells"] = int(np.asarray(cell_mask).size)
     if val_dataset is not None:
         result["val_loss_history"] = val_loss_history
     if ema_params:

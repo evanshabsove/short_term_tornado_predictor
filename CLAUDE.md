@@ -1747,16 +1747,47 @@ gitignored mask is not built). Does not touch the grid, labels, features or any 
   Calgary is inside the domain, Red Deer is at the top edge, Edmonton (53.5N) is outside --
   so the Alberta gap likely includes real tornado country, and cells within a few rows of the
   top edge also have less spatial context for the U-Net's receptive field.
-- **Open concern, unverified:** SPC reports are believed to be US-only. If so, every
-  Canadian cell is labeled 0 on every sample, including when a Canadian tornado actually
-  occurred -- label noise on ~11% of the grid that penalizes the model for correctly
-  flagging Canadian tornado environments. Check the SPC CSV's state codes before relying on
-  this. Candidate fixes (not done): mask Canadian cells out of the loss/metrics (quick, uses
-  this mask), or add Northern Tornadoes Project / Environment Canada labels (proper).
+- **Confirmed: Canadian cells are essentially always labeled 0.** The SPC CSV
+  (`spc_tornado_reports_2014_2025.csv`, 15,294 reports) contains only US states/territories
+  (no Canadian province codes; its `CA` is California). Checked against
+  `tornado_labels_2014_2025.csv` (147,440 rows): of 3,237 unique positive cells, 3,122 are US,
+  111 water, 3 MX, and **1 of the 1,243 Canadian cells** (24 label rows, a border-crossing US
+  track) -- the other 1,242 are never positive, whether or not a Canadian tornado occurred
+  there. That is label noise on ~11% of the grid. Magnitude of the effect on metrics/training
+  is NOT yet measured (Canadian tornadoes are probably a small fraction of the ~1,400/yr US
+  count, but that figure is from memory). Candidate fixes (not done): evaluation-only rescoring
+  with Canadian cells masked out (cheap, no retrain), masked-loss retraining (needs >=3 seeds
+  per the seed-variance rules), or Northern Tornadoes Project / Environment Canada labels.
 - **Next steps, not done:** quantify NTP/ECCC tornado counts inside vs. outside the grid and
   by distance to the top edge; investigate Canadian NWP (HRDPS, RRFS) archive depth before any
   model switch. An inquiry about NTP data access was sent to the Northern Tornadoes Project
   (no reply recorded here).
+
+### US-only baseline (mask non-US cells from loss and metrics): Stage A done, Stage B built but not run
+
+Because SPC has no Canadian/Mexican labels, those cells (1,909 of 11,178: CA 1,243, MX 659, other land 7) are always labeled 0
+(see "Country mask" above). `cell_mask.py` defines the **US-trusted mask** (`country` in {water, US}, 9,269 cells kept); `FocalLoss`
+(`mask=`), `training.train_model(cell_mask=)`, `evaluate.get_proba_labels/evaluate_model/evaluate_checkpoint(cell_mask=)` and
+`cross_validate_year.py --cell-mask us_trusted` use it. Default is off and bit-for-bit unchanged (206 tests pass, incl.
+`tests/test_cell_mask.py`). Design choices: masked loss is divided by the TOTAL cell count (not the kept count) so loss scale/effective LR
+match the unmasked baseline; a map whose only positive is in an excluded cell counts as quiet for `QuietMapDownsampler`
+(`training.masked_is_active`); **inputs keep the full grid** (the CNN still sees weather across the border); mask provenance
+(`cell_mask_name`, kept/total cells) is saved in each checkpoint's `training_hyperparameters`.
+
+- **Stage A (evaluation-only rescore, `scripts/08_canada_transfer/rescore_with_mask.py`, results `models/us_only_study/stage_a_rescore.json`):**
+  existing models (trained with the UNMASKED loss), cached scores, metric-only exclusion. All-True mask reproduces the unmasked numbers exactly.
+  Masked AUC-PR >= unmasked in 12/12 folds for both the old and v4 12-fold models and 18/18 EMA-study single models, but the gain is tiny:
+  **old +0.4%, v4 +0.7%, EMA-study singles +0.4-0.5%** (6-seed ensembles +0.0-0.2%); best-F1 +0.1-0.3%. Pre-registered predictions held (>=9/12 improved;
+  gain in the 0-10% range, well inside the ~19% seed noise; best-F1 moves less than AUC-PR). **Conclusion: scoring Canadian/Mexican cells as
+  negatives barely moves current metrics** -- the model already gives those cells low probability. Mean predicted p (v4, pooled): US 0.0128, CA 0.0027,
+  MX 0.0038 (CA peaks in July, 0.0042, consistent with the summer severe season). This does NOT show the label noise is harmless for training (the models
+  still learned from it) or say anything about Canadian skill (no Canadian labels exist to test it).
+- **Stage B (masked-loss retrain; `scripts/08_canada_transfer/run_us_only_study.sh`, evaluator `us_only_eval.py`):** code, tests and a 2-epoch smoke
+  run (fold 2014, seed 10: provenance saved correctly) done; the full run (EMA 0.9999, seeds 10-12, folds 2016/2020/2024, ~7-8 h CPU) has NOT been run.
+  It is compared on US-trusted cells only against the existing unmasked-trained averaged models (seeds 10-15). Pre-registered rule: "helps" if pooled
+  ensemble AUC-PR >= +8% and positive in >= 2/3 folds; "hurts" if <= -8% and negative in >= 2/3; else no detectable effect. Descriptive extra: mean predicted p
+  over CA/MX cells for masked vs unmasked training (does unmasked training suppress probability over cells it was always told were negative?).
+  Stage C (add NTP/ECCC Canadian labels, compare against this US-only baseline) is a separate, not-yet-planned ticket.
 
 ## Current status
 

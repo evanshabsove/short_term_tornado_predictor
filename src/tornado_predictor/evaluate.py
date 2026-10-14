@@ -37,14 +37,21 @@ from tornado_predictor.inference import assert_feature_order_matches, load_check
 from tornado_predictor.training import DenseGridDataset
 
 
-def get_proba_labels(model, dataset: DenseGridDataset) -> tuple[np.ndarray, np.ndarray]:
+def get_proba_labels(model, dataset: DenseGridDataset, cell_mask: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Runs model over every sample in dataset, flattening and
     concatenating predicted probabilities and true labels across every
-    cell in every sample into one (y_score, y_true) pair."""
+    cell in every sample into one (y_score, y_true) pair.
+
+    cell_mask (optional, (row, col) bool): keep only cells where True
+    (e.g. cell_mask.us_trusted_mask). Default None keeps every cell,
+    unchanged. The model still receives the full grid as input."""
     probs, labels = [], []
+    keep = None if cell_mask is None else np.asarray(cell_mask, dtype=bool)
     for i in range(len(dataset)):
         X, y = dataset[i]
         proba = predict_proba(model, X)
+        if keep is not None:
+            proba, y = proba[keep], y[keep]
         probs.append(proba.ravel())
         labels.append(y.ravel())
     return np.concatenate(probs), np.concatenate(labels)
@@ -133,15 +140,15 @@ def compute_metrics(y_true: np.ndarray, y_score: np.ndarray, include_curves: boo
     return metrics
 
 
-def evaluate_model(model, dataset: DenseGridDataset, include_curves: bool = True) -> dict:
+def evaluate_model(model, dataset: DenseGridDataset, include_curves: bool = True, cell_mask: np.ndarray | None = None) -> dict:
     """Evaluates an already-in-memory model against dataset -- no
     checkpoint save/reload round-trip, for use right after training
-    (e.g. an alpha or architecture sweep)."""
-    y_score, y_true = get_proba_labels(model, dataset)
+    (e.g. an alpha or architecture sweep). cell_mask: see get_proba_labels."""
+    y_score, y_true = get_proba_labels(model, dataset, cell_mask=cell_mask)
     return compute_metrics(y_true, y_score, include_curves=include_curves)
 
 
-def evaluate_checkpoint(checkpoint_path: str, dataset_path: str, include_curves: bool = True) -> dict:
+def evaluate_checkpoint(checkpoint_path: str, dataset_path: str, include_curves: bool = True, cell_mask: np.ndarray | None = None) -> dict:
     """Loads a saved checkpoint and dataset from disk and evaluates.
     Raises via assert_feature_order_matches if the dataset's feature
     channel order doesn't match the checkpoint's training-time order --
@@ -154,7 +161,7 @@ def evaluate_checkpoint(checkpoint_path: str, dataset_path: str, include_curves:
     dataset = DenseGridDataset(dataset_path)
     assert_feature_order_matches(dataset.feature_names, checkpoint)
 
-    metrics = evaluate_model(model, dataset, include_curves=include_curves)
+    metrics = evaluate_model(model, dataset, include_curves=include_curves, cell_mask=cell_mask)
     metrics["final_train_loss"] = checkpoint["loss_history"][-1]
     val_loss_history = checkpoint.get("val_loss_history")
     metrics["final_val_loss"] = val_loss_history[-1] if val_loss_history else float("nan")
