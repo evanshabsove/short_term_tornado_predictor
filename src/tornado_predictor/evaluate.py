@@ -18,9 +18,9 @@ configurations at a fixed 0.5 cutoff is not a fair comparison once
 alpha (or any other calibration-shifting hyperparameter) varies.
 
 Use evaluate_model() when a model is already in memory (e.g. right
-after training, in scripts/sweep_alpha.py-style experiments) and
+after training, in scripts/03_architecture_search/sweep_alpha.py-style experiments) and
 evaluate_checkpoint() when starting from a saved checkpoint path (e.g.
-scripts/evaluate_model.py, or comparing many past runs).
+scripts/03_architecture_search/evaluate_model.py, or comparing many past runs).
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def compute_metrics(y_true: np.ndarray, y_score: np.ndarray, include_curves: boo
     roc_curve/pr_curve are returned as plain Python lists (not numpy
     arrays) when include_curves=True, so the whole dict round-trips
     through json.dumps with no extra conversion -- needed for
-    accumulating results across many runs (see scripts/sweep_alpha.py's
+    accumulating results across many runs (see scripts/03_architecture_search/sweep_alpha.py's
     results.json for the existing pattern this follows). Pass
     include_curves=False to omit them when comparing many models and
     plotting data isn't needed."""
@@ -145,7 +145,7 @@ def evaluate_checkpoint(checkpoint_path: str, dataset_path: str, include_curves:
     """Loads a saved checkpoint and dataset from disk and evaluates.
     Raises via assert_feature_order_matches if the dataset's feature
     channel order doesn't match the checkpoint's training-time order --
-    same guard scripts/run_inference.py already relies on, since a
+    same guard scripts/03_architecture_search/run_inference.py already relies on, since a
     silent mismatch would produce plausible-looking but meaningless
     metrics. Merges in the checkpoint's own final_train_loss/
     final_val_loss (nan if the checkpoint has no val_loss_history, e.g.

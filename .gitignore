@@ -35,13 +35,13 @@ data/processed/*
 *.h5
 *.parquet
 
-# Trained model weights (regenerable via scripts/train_model.py)
+# Trained model weights (regenerable via scripts/03_architecture_search/train_model.py)
 models/*
 !models/.gitkeep
 *.pt
 *.pth
 
-# Generated visualizations (regenerable via scripts/run_inference.py etc.)
+# Generated visualizations (regenerable via scripts/03_architecture_search/run_inference.py etc.)
 outputs/*
 !outputs/.gitkeep
 

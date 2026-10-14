@@ -21,7 +21,7 @@ Each augmented run is written to a NEW path, never overwriting the
 source staged file in place: the existing v2 staging directory is the
 source of truth for ~40 hours of already-correct work, and a bug in
 the merge logic here should never be able to corrupt it. Callers (see
-scripts/augment_dataset_fields.py) point src at the existing
+scripts/07_updraft_helicity/augment_dataset_fields.py) point src at the existing
 data/interim/scaled_build_v2/ directory and dst at a fresh
 data/interim/scaled_build_v3/ directory.
 """

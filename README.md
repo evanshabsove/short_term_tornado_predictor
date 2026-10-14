@@ -30,7 +30,7 @@ The pipeline has five stages, each a small, independently runnable
 module + script under `src/tornado_predictor/` / `scripts/`. Every stage
 is covered by offline unit tests in `tests/` except where noted.
 
-### 1. Grid definition (`grid.py`, `scripts/build_grid.py`)
+### 1. Grid definition (`grid.py`, `scripts/01_data_pipeline/build_grid.py`)
 
 The ~40 km grid is **not** an independently reprojected or interpolated
 grid. It's built by **block-aligned stride coarsening of HRRR's own
@@ -40,7 +40,7 @@ native grid**:
   parallels 38.5°N, central meridian -97.5°, spherical earth
   R=6,371,229 m, 3 km spacing, 1799×1059 points) — these constants are
   verified against a live HRRR grib file's `GRIB_*` keys by
-  `scripts/verify_hrrr_grid_params.py`.
+  `scripts/01_data_pipeline/verify_hrrr_grid_params.py`.
 - Coarse cells are exact, contiguous 13×13 blocks of native HRRR pixels
   (13 × 3 km = **39 km**, the closest integer stride to "~40 km").
   Coarse grid shape is **(81, 138)** rows × cols; any leftover partial
@@ -60,7 +60,7 @@ native grid**:
   needed to reconstruct cell boundaries, so a loaded grid never depends
   on `grid.py`'s constants matching what built the file.
 
-**Reproduce:** `python scripts/build_grid.py`
+**Reproduce:** `python scripts/01_data_pipeline/build_grid.py`
 
 ### 2. Time bins (`time_bins.py`)
 
@@ -98,7 +98,7 @@ confirmed live to currently end around 2025-09, lagging real time by
 roughly a year. See `CLAUDE.md`'s "Time binning (locked in)" section
 for the full verification detail.
 
-### 3. Features (`features.py`, `scripts/extract_features.py`)
+### 3. Features (`features.py`, `scripts/01_data_pipeline/extract_features.py`)
 
 For one `(init_time, fxx)`, pulls these HRRR fields via
 [Herbie](https://github.com/blaylockbk/Herbie) and pools each onto the
@@ -135,14 +135,14 @@ most-unstable), so these stay exact.
   is a possible future refinement (see
   [Known Limitations](#known-limitations)).
 
-**Reproduce:** `python scripts/extract_features.py --init-time "2024-05-06 00:00" --fxx 3`
+**Reproduce:** `python scripts/01_data_pipeline/extract_features.py --init-time "2024-05-06 00:00" --fxx 3`
 
-### 4. Label logic (`labels.py`, `scripts/build_labels.py`)
+### 4. Label logic (`labels.py`, `scripts/01_data_pipeline/build_labels.py`)
 
 Assigns positive tornado labels to `(grid cell, run init_time,
 bin_index)` samples from SPC storm reports
 (`data/processed/spc_tornado_reports_2014_2025.csv`, itself built by
-`scripts/download_spc_tornado_reports.py` with full track geometry).
+`scripts/01_data_pipeline/download_spc_tornado_reports.py` with full track geometry).
 
 - **Full-track spatial matching, not touchdown-point-only.** Each
   report's track (`path_wkt`, a straight line from touchdown to
@@ -180,9 +180,9 @@ original 2012–2022 pass's 10/12,649), and the one outlier touching >10
 cells (13) is the December 10, 2021 Quad-State/Mayfield EF4 — the
 longest track in the dataset (~165 miles), not a bug.
 
-**Reproduce:** `python scripts/build_labels.py`
+**Reproduce:** `python scripts/01_data_pipeline/build_labels.py`
 
-### 5. Consolidated training dataset (`dataset.py`, `scripts/build_training_dataset.py`)
+### 5. Consolidated training dataset (`dataset.py`, `scripts/02_dataset_build/build_training_dataset.py`)
 
 Combines feature extraction and labeling across multiple HRRR runs into
 one array-ready dataset.
@@ -204,9 +204,9 @@ one array-ready dataset.
   labeled SPC range *and* produces genuine positive labels (167
   positive sample/cell pairs across 6 samples), not an all-zero check.
 
-**Reproduce:** `python scripts/build_training_dataset.py --init-times "2021-12-10 21:00" "2021-12-10 22:00" "2021-12-10 23:00"`
+**Reproduce:** `python scripts/02_dataset_build/build_training_dataset.py --init-times "2021-12-10 21:00" "2021-12-10 22:00" "2021-12-10 23:00"`
 
-### Validation against a documented case (`scripts/validate_documented_case.py`)
+### Validation against a documented case (`scripts/01_data_pipeline/validate_documented_case.py`)
 
 Rather than a synthetic sanity check, the pipeline is spot-checked
 against one specific, real, well-documented tornado: the EF4 that
@@ -226,7 +226,7 @@ leading up to touchdown — 0–1km and 0–3km storm-relative helicity more
 than double in the final hour before the tornado, while CAPE stays
 substantial (1200–2000 J/kg) throughout.
 
-**Reproduce:** `python scripts/validate_documented_case.py`
+**Reproduce:** `python scripts/01_data_pipeline/validate_documented_case.py`
 
 ## Class Imbalance (for modeling)
 
@@ -299,7 +299,7 @@ first baseline (explicitly not a final architecture): input is
 
 `training.train_model()` wires `DenseGridDataset` + `QuietMapDownsampler`
 + `FocalLoss` + a given model into an actual training loop, used by
-`scripts/train_model.py`.
+`scripts/03_architecture_search/train_model.py`.
 
 - **No train/val split.** At the pilot's 6-sample scale a formal split
   isn't meaningful — the script trains on all samples and reports
@@ -308,7 +308,7 @@ first baseline (explicitly not a final architecture): input is
   `seed` argument controls the sampler (independent of torch's global
   RNG), but model weight *initialization* happens in the caller, so
   `torch.manual_seed(seed)` must be called before constructing the
-  model too — `scripts/train_model.py` does this.
+  model too — `scripts/03_architecture_search/train_model.py` does this.
 - **Checkpoints are self-describing**: `model_state_dict`,
   `loss_history`, `training_hyperparameters`, `model_hyperparameters`
   (`in_channels`, `hidden_channels`), and `feature_names` — enough to
@@ -319,12 +319,12 @@ first baseline (explicitly not a final architecture): input is
   as expected (memorization, not generalization — see the Consolidated
   Training Dataset section above for why the pilot is scoped this small).
 
-**Reproduce:** `python scripts/train_model.py`
+**Reproduce:** `python scripts/03_architecture_search/train_model.py`
 
 ## Train/Val Split
 
 `src/tornado_predictor/split.py` splits a `run_bins` list into
-train/val without leakage — wired into `scripts/build_training_dataset.py`
+train/val without leakage — wired into `scripts/02_dataset_build/build_training_dataset.py`
 (now produces two files) and `training.train_model()` (now optionally
 tracks val loss per epoch via `training.evaluate()`).
 
@@ -360,7 +360,7 @@ et al. 2024, read directly, not from memory):
   epoch 10–15 (~0.0015) while train loss keeps improving to ~0.0006 —
   exactly what a validation set exists to catch.
 
-**Reproduce:** `python scripts/build_training_dataset.py --init-times "2021-12-10 21:00" "2021-12-10 22:00" "2021-12-10 23:00" "2024-04-26 20:00" "2024-04-26 22:00"`
+**Reproduce:** `python scripts/02_dataset_build/build_training_dataset.py --init-times "2021-12-10 21:00" "2021-12-10 22:00" "2021-12-10 23:00" "2024-04-26 20:00" "2024-04-26 22:00"`
 
 ## First Scale-Up
 
@@ -401,7 +401,7 @@ the full multi-year archive.
 
 `src/tornado_predictor/inference.py` loads a checkpoint, predicts a
 per-cell probability map for a sample, and sanity-checks/visualizes it
-against that sample's known positive labels, via `scripts/run_inference.py`.
+against that sample's known positive labels, via `scripts/03_architecture_search/run_inference.py`.
 
 - **`assert_feature_order_matches` is a real correctness guard.** The
   dataset's feature channel order must exactly match the checkpoint's
@@ -429,7 +429,7 @@ against that sample's known positive labels, via `scripts/run_inference.py`.
   positive cells in every sample, not memorized noise scattered
   arbitrarily across the domain.
 
-**Reproduce:** `python scripts/run_inference.py`
+**Reproduce:** `python scripts/03_architecture_search/run_inference.py`
 
 ## Case Study: Prediction vs. Detection
 
@@ -469,15 +469,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
 
-python scripts/download_spc_tornado_reports.py      # SPC reports -> data/processed/
-python scripts/build_grid.py                         # ~40km grid  -> data/processed/
-python scripts/verify_hrrr_grid_params.py             # optional: live grid-param check (needs network)
-python scripts/build_labels.py                        # labels      -> data/processed/
-python scripts/extract_features.py --init-time "2024-05-06 00:00" --fxx 3   # single-snapshot smoke test
-python scripts/build_training_dataset.py --init-times "2021-12-10 21:00" "2021-12-10 22:00" "2021-12-10 23:00" "2024-04-26 20:00" "2024-04-26 22:00"  # leakage-safe train/val split -> data/processed/
-python scripts/validate_documented_case.py            # spot-check against a real event
-python scripts/train_model.py --dataset data/processed/training_dataset_train.nc --val-dataset data/processed/training_dataset_val.nc  # train + track val loss -> models/
-python scripts/run_inference.py                        # inference + sanity check -> outputs/
+python scripts/01_data_pipeline/download_spc_tornado_reports.py      # SPC reports -> data/processed/
+python scripts/01_data_pipeline/build_grid.py                         # ~40km grid  -> data/processed/
+python scripts/01_data_pipeline/verify_hrrr_grid_params.py             # optional: live grid-param check (needs network)
+python scripts/01_data_pipeline/build_labels.py                        # labels      -> data/processed/
+python scripts/01_data_pipeline/extract_features.py --init-time "2024-05-06 00:00" --fxx 3   # single-snapshot smoke test
+python scripts/02_dataset_build/build_training_dataset.py --init-times "2021-12-10 21:00" "2021-12-10 22:00" "2021-12-10 23:00" "2024-04-26 20:00" "2024-04-26 22:00"  # leakage-safe train/val split -> data/processed/
+python scripts/01_data_pipeline/validate_documented_case.py            # spot-check against a real event
+python scripts/03_architecture_search/train_model.py --dataset data/processed/training_dataset_train.nc --val-dataset data/processed/training_dataset_val.nc  # train + track val loss -> models/
+python scripts/03_architecture_search/run_inference.py                        # inference + sanity check -> outputs/
 jupyter nbconvert --to notebook --execute --inplace notebooks/case_study_prediction_vs_detection.ipynb
 pytest tests/                                          # offline unit tests
 ```

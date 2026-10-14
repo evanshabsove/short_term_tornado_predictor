@@ -3,7 +3,7 @@ Data prep for a gradient-boosted tree model family -- a genuinely
 different alternative to the CNN/U-Net line (model.py/unet.py),
 motivated by literature finding a histogram gradient-boosted tree
 (HGBT) beat a deep U-Net on a closely analogous CAM-grid severe-weather
-task. See scripts/train_gbt.py for the actual model
+task. See scripts/04_baselines/train_gbt.py for the actual model
 (sklearn.ensemble.HistGradientBoostingClassifier).
 
 Two small, pure/testable functions -- the model itself is a standard

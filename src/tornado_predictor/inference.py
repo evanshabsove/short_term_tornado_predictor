@@ -1,5 +1,5 @@
 """
-Loads a trained checkpoint (scripts/train_model.py) and runs it on
+Loads a trained checkpoint (scripts/03_architecture_search/train_model.py) and runs it on
 samples from a consolidated dataset (training.DenseGridDataset),
 producing a per-cell tornado probability map plus a training-set-fit
 sanity check against the known positive labels for that sample.

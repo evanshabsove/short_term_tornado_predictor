@@ -21,7 +21,7 @@ once the training set is scaled beyond a single outbreak.
 
 Also holds train_model(), the training loop that wires FocalLoss,
 DenseGridDataset, and QuietMapDownsampler together with a given model
-(see model.py for the architecture) -- used by scripts/train_model.py.
+(see model.py for the architecture) -- used by scripts/03_architecture_search/train_model.py.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class FocalLoss(nn.Module):
     for the negative class -- so a HIGHER alpha gives MORE weight to
     the rare positive class, not less. (An earlier version of this
     docstring said the opposite -- "expect to need a lower alpha" --
-    which was backwards; corrected after scripts/sweep_alpha.py
+    which was backwards; corrected after scripts/03_architecture_search/sweep_alpha.py
     empirically confirmed the direction on the full-scale dataset:
     mean_proba_positive rose monotonically with alpha across 0.1-0.9,
     and alpha=0.9 gave the best held-out Cohen's d (3.08) and miss

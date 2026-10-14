@@ -10,7 +10,7 @@ native HRRR pixels (13x13 -> 39km, the closest integer stride to
 HRRR data download.
 
 The HRRR_* constants below are the standard, documented HRRR CONUS grid
-parameters. Run scripts/verify_hrrr_grid_params.py (requires network
+parameters. Run scripts/01_data_pipeline/verify_hrrr_grid_params.py (requires network
 access) to confirm them against a live HRRR grib2 file before trusting
 this module for anything beyond exploratory use.
 """

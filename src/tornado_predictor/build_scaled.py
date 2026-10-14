@@ -200,7 +200,7 @@ def process_one_run(
 def combine_staged_runs(staging_dir: Path, run_bins_subset: list[tuple]) -> xr.Dataset | None:
     """Combines staged per-run samples for an arbitrary run_bins subset
     into one in-memory xr.Dataset -- shared by finalize(), finalize_3way(),
-    and scripts/cross_validate_year.py's per-fold combining. Loads fully
+    and scripts/05_year_cv_diagnostics/cross_validate_year.py's per-fold combining. Loads fully
     into memory (`.load()`) before closing the source per-run file
     handles, so the returned Dataset is safe to use however the caller
     likes (write to netcdf, or consume directly) -- the original inline

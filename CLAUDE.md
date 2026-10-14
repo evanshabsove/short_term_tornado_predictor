@@ -51,7 +51,7 @@ grid:
   parallels 38.5°N, central meridian -97.5°, spherical earth
   R=6371229m, 3km native spacing) — see `src/tornado_predictor/grid.py`.
   These constants are verified against a live HRRR grib file's `GRIB_*`
-  keys by `scripts/verify_hrrr_grid_params.py`.
+  keys by `scripts/01_data_pipeline/verify_hrrr_grid_params.py`.
 - Coarse cells are exact contiguous 13x13 blocks of native HRRR pixels
   (13 * 3km = 39km, the closest integer stride to "~40km"). Coarse grid
   shape is (81, 138) rows x cols; any leftover partial block at the
@@ -67,7 +67,7 @@ grid:
   boundary polygons) is derived purely from projection math — it does
   not require downloading HRRR data — and is saved to
   `data/processed/hrrr_coarse_grid_stride13.nc` by
-  `scripts/build_grid.py`.
+  `scripts/01_data_pipeline/build_grid.py`.
 - Do not switch to an interpolated/reprojected grid or change the
   stride without discussing with the user first — later feature
   aggregation depends on the exact block-alignment between coarse
@@ -126,12 +126,12 @@ projection math.
   - SPC reports are now downloaded/parsed for this range:
     `data/processed/spc_tornado_reports_2014_2025.csv` (15,294 reports,
     up from 12,649 for the original, arbitrarily-chosen 2012–2022
-    range) via `scripts/download_spc_tornado_reports.py` (defaults
+    range) via `scripts/01_data_pipeline/download_spc_tornado_reports.py` (defaults
     updated to `--start-year 2014 --end-year 2025`). The labels table
     was rebuilt to match: `data/processed/tornado_labels_2014_2025.csv`
-    (147,440 rows; 111,580 unique positives) via `scripts/build_labels.py`
+    (147,440 rows; 111,580 unique positives) via `scripts/01_data_pipeline/build_labels.py`
     (defaults updated to match). All downstream default paths
-    (`scripts/build_training_dataset.py`, `scripts/validate_documented_case.py`,
+    (`scripts/02_dataset_build/build_training_dataset.py`, `scripts/01_data_pipeline/validate_documented_case.py`,
     `tests/test_labels.py`) were repointed to the new filenames; the
     old `_2012_2022` files were deleted (gitignored/regenerable, not a
     data-loss concern). The existing pilot dataset/checkpoint/notebook
@@ -148,7 +148,7 @@ projection math.
 
 `src/tornado_predictor/features.py` pulls HRRR forecast fields for one
 `(init_time, fxx)` and pools each onto the coarse grid, via
-`scripts/extract_features.py`.
+`scripts/01_data_pipeline/extract_features.py`.
 
 - **Fields** (verified against a live HRRR `sfc` `.idx` file, exact
   Herbie search strings — a loose `"CAPE:"` would also match HRRR's
@@ -191,7 +191,7 @@ projection math.
 
 `src/tornado_predictor/labels.py` assigns positive tornado labels to
 `(grid cell, run init_time, bin_index)` samples from SPC reports, via
-`scripts/build_labels.py`.
+`scripts/01_data_pipeline/build_labels.py`.
 
 - **Full-track spatial matching, not touchdown-point-only.** Each
   report's `path_wkt` is buffered by half its `width_yd` (converted to
@@ -240,7 +240,7 @@ projection math.
 
 `src/tornado_predictor/dataset.py` combines feature extraction and
 labeling across multiple HRRR runs into one dataset, via
-`scripts/build_training_dataset.py`.
+`scripts/02_dataset_build/build_training_dataset.py`.
 
 - **One representative fxx per bin, not full-bin aggregation.** A bin
   spans 4 forecast hours (`time_bins.fxx_values_for_bin`), but each
@@ -271,7 +271,7 @@ labeling across multiple HRRR runs into one dataset, via
 
 ### First scale-up (44 train / 6 val samples)
 
-Built via `scripts/build_training_dataset.py`, applying `split.py`'s
+Built via `scripts/02_dataset_build/build_training_dataset.py`, applying `split.py`'s
 leakage-safe split (see above) to a **stratified sample of 25 dates**
 (2014–2025) rather than the full training period — deliberately
 sized down, per an explicit scope decision, to something that
@@ -327,7 +327,7 @@ multi-year archive (that's further-out future work).
 
 ### Full-scale build v1 (superseded — see v2 below)
 
-Built via `scripts/build_scaled_dataset.py` + `src/tornado_predictor/build_scaled.py`
+Built via `scripts/02_dataset_build/build_scaled_dataset.py` + `src/tornado_predictor/build_scaled.py`
 (see that module's docstring for the manifest-based resumable design).
 Per explicit user direction ("everything all active and quiet days...
 happy to have this running in the background"), this covers **every**
@@ -408,13 +408,13 @@ split as one unit, unchanged from before.
 - **Not yet done**: retraining `TornadoCNN` on this dataset and
   re-running the generalization evaluation that flagged v1's smaller
   25-date scale-up as insufficient (see "First scale-up" above) — this
-  build only produces the dataset; `scripts/train_model.py --val-dataset ...`
+  build only produces the dataset; `scripts/03_architecture_search/train_model.py --val-dataset ...`
   against it is the natural next step, not performed automatically
   here.
 
 ### Full-scale training run (first statistically real generalization result)
 
-`scripts/train_model.py --dataset training_dataset_train_full.nc
+`scripts/03_architecture_search/train_model.py --dataset training_dataset_train_full.nc
 --val-dataset training_dataset_val_full.nc --epochs 50` against the
 full-scale v2 dataset, default hyperparameters (`alpha=0.25`,
 `gamma=2.0`, `quiet_keep_fraction=0.2`, `lr=1e-3`, `batch_size=2`,
@@ -467,7 +467,7 @@ scale). Checkpoint: `models/tornado_cnn_full.pt`.
 
 ### Alpha sweep (resolved — corrects earlier "lower alpha" guidance)
 
-`scripts/sweep_alpha.py` trains 5 identical `TornadoCNN` runs on the
+`scripts/03_architecture_search/sweep_alpha.py` trains 5 identical `TornadoCNN` runs on the
 full-scale dataset (same data, architecture, epochs=50, seed=0),
 varying only `FocalLoss`'s `alpha`: 0.1, 0.25 (prior default), 0.5,
 0.75, 0.9. Analyzed in `notebooks/alpha_sweep_results.ipynb`.
@@ -567,12 +567,12 @@ used hand-rolled mean-probability comparisons.
 - **The metric logic above is now a tested library module**, not just
   notebook code: `src/tornado_predictor/evaluate.py`
   (`get_proba_labels`, `compute_metrics`, `evaluate_model`,
-  `evaluate_checkpoint`) + `scripts/evaluate_model.py` (CLI, prints a
+  `evaluate_checkpoint`) + `scripts/03_architecture_search/evaluate_model.py` (CLI, prints a
   summary and can save full metrics as JSON via `--out`). Architecture
   ticket 1 of the widening plan — every future architecture variant
   (tickets 2-5) should call this instead of re-deriving the metric
   computation. Verified to reproduce the comparison notebook's exact
-  numbers bit-for-bit (`python scripts/evaluate_model.py` against the
+  numbers bit-for-bit (`python scripts/03_architecture_search/evaluate_model.py` against the
   default full-scale/alpha=0.25 config prints AUC-ROC=0.9819,
   AUC-PR=0.0283, matching above precisely). `scikit-learn`'s
   `roc_auc_score`/`average_precision_score`/`precision_recall_curve`/
@@ -581,7 +581,7 @@ used hand-rolled mean-probability comparisons.
   raising (`sklearn` itself raises `ValueError` on a single-class
   input) — same convention `inference.sanity_check_against_labels`
   already used. **`notebooks/model_comparison_summary.ipynb` and
-  `scripts/sweep_alpha.py` were NOT retrofitted to call this module** —
+  `scripts/03_architecture_search/sweep_alpha.py` were NOT retrofitted to call this module** —
   they keep their own inline copies of the same logic; only future work
   uses the extracted version.
 
@@ -592,7 +592,7 @@ used hand-rolled mean-probability comparisons.
 verified bit-identical against `tornado_cnn_full.pt`'s real predictions
 before/after the change, so every existing checkpoint still loads
 correctly with no migration). Added `receptive_field_cells(n)` =
-`1 + 2*n`. `scripts/sweep_architecture.py` trained 4 new
+`1 + 2*n`. `scripts/03_architecture_search/sweep_architecture.py` trained 4 new
 (`hidden_channels`, `n_hidden_layers`) configs on the full-scale v2
 dataset, all other hyperparameters fixed at the established best
 config (`alpha=0.25`, 50 epochs, seed=0), and re-evaluated the existing
@@ -655,7 +655,7 @@ both the original baseline and ticket 2's winner's real predictions
 before/after the change. `receptive_field_cells` generalized to
 `1 + 2*sum(dilations)`. Channel width fixed at 32 throughout (ticket
 2's best/cheapest width) to isolate the dilation effect.
-`scripts/sweep_dilation.py` mirrors ticket 2's sweep script pattern.
+`scripts/03_architecture_search/sweep_dilation.py` mirrors ticket 2's sweep script pattern.
 
 **A real bug was caught and fixed while writing this ticket's tests,
 worth recording**: the standard way to empirically verify a CNN's
@@ -843,7 +843,7 @@ same as always); test is carved from what the 2-way split called
 train — days never touched by any past architecture decision, since
 train was only ever used for gradient updates. No new HRRR pulls
 needed — built entirely from the existing v2 staged runs via
-`scripts/build_3way_split.py`, output to clearly-distinct
+`scripts/02_dataset_build/build_3way_split.py`, output to clearly-distinct
 `training_dataset_{train,test,val}_3way.nc` files (the canonical
 `_full.nc` files tickets 1-5 depend on are untouched).
 
@@ -907,7 +907,7 @@ needed — built entirely from the existing v2 staged runs via
 Literature found an HGBT beat a U-Net on a closely analogous CAM-grid
 task — this ticket tested whether that holds here too.
 `src/tornado_predictor/gbt.py` (`flatten_for_gbt`,
-`downsample_negative_cells`) + `scripts/train_gbt.py` trained
+`downsample_negative_cells`) + `scripts/04_baselines/train_gbt.py` trained
 `sklearn.ensemble.HistGradientBoostingClassifier` on
 `training_dataset_train_3way.nc` flattened to one row per grid cell,
 keeping every positive cell and downsampling negatives to 20:1 (9,992
@@ -973,7 +973,7 @@ this dataset's size easily).
 
 > **SUPERSEDED IN PART (see "UH re-test with averaged ensembles" below, notebook Part 7):** the result below was a single seed on a single split; with ~19% seed noise it is not a reliable negative. The multi-seed averaged-ensemble re-test found no detectable pooled effect of UH 2-5 km, and the Cohen's d / AUC-PR divergence described here did not replicate. Kept as recorded at the time.
 
-The data pull (section above, `scripts/augment_dataset_fields.py`)
+The data pull (section above, `scripts/07_updraft_helicity/augment_dataset_fields.py`)
 finished successfully: 3,182 of 3,183 runs augmented (one sustained
 network outage mid-job cost 851 runs, recovered via `--retry-failed`
 once connectivity returned — down to 1 genuine remaining failure).
@@ -1055,7 +1055,7 @@ same pattern as the 2-way/3-way functions); `build_scaled.py`'s duplicated
 `combine()` closure was extracted into a shared, reusable
 `combine_staged_runs` helper (with a real `.load()` correctness fix —
 the original inline version only worked because its callers happened to
-call `to_netcdf` before closing source file handles). `scripts/cross_validate_year.py`
+call `to_netcdf` before closing source file handles). `scripts/05_year_cv_diagnostics/cross_validate_year.py`
 runs 12 leave-one-year-out folds (2014-2025) on the identical established
 recipe (`TornadoUNet(base_channels=16)`, alpha=0.25, 50 epochs, seed=0),
 reusing the already-staged v2 runs — no new HRRR pulls. Full results and
@@ -1111,7 +1111,7 @@ plots: `notebooks/cv_year_holdout_results.ipynb`.
 
 ### Full-scale build v4 (expanded quiet dates + one retry pass)
 
-Same `scripts/build_scaled_dataset.py` / manifest (`data/interim/scaled_build_v2/`),
+Same `scripts/02_dataset_build/build_scaled_dataset.py` / manifest (`data/interim/scaled_build_v2/`),
 re-run with `--quiet-mode all` (every remaining quiet date, not 300 sampled) and
 then `--retry-failed`. Outputs: `data/processed/training_dataset_{train,val}_full_v4.nc`
 (the canonical `_full.nc` files are untouched).
@@ -1140,14 +1140,14 @@ then `--retry-failed`. Outputs: `data/processed/training_dataset_{train,val}_ful
   (symlinks: the `_v3` augmented copy for the old runs, the native file for the new ones): all 4,918 of 4,919 runs
   carry UH, `uh_2_5km` has zero NaN, `uh_0_2km` is all-NaN exactly for pre-2018-07-13 runs, and the 14 base
   features and labels are identical to the `_v2` copies (checked on 40 runs); the one exception is 2022-10-14.
-- `scripts/cross_validate_year.py` gained `--drop-columns` (needed because
+- `scripts/05_year_cv_diagnostics/cross_validate_year.py` gained `--drop-columns` (needed because
   staged runs mix with/without UH, and xr.concat silently NaN-fills).
 - **v4 year-holdout CV result (12 folds, `models/cv_year_holdout_v4/`, 14
   features, identical recipe): v4 is statistically indistinguishable from the
   original -- not better, not worse.** As reported (different test sets) AUC-PR
   is 0.0442 +/- 0.0142 vs. the original 0.0486 +/- 0.0180 (-9%, v4 wins 3/12
   folds), but those test sets differ. Scoring both model sets on the *same*
-  samples (`scripts/compare_cv_old_vs_v4.py`, inference only; results in
+  samples (`scripts/05_year_cv_diagnostics/compare_cv_old_vs_v4.py`, inference only; results in
   `models/cv_year_holdout_v4/like_for_like.json`; analysis in
   `notebooks/cv_v4_vs_v2_comparison.ipynb`): AUC-PR **-4.0%** on the full v4
   test years (5/12 wins, paired-t p=0.54) and **-3.7%** on the old-run subset
@@ -1181,7 +1181,7 @@ then `--retry-failed`. Outputs: `data/processed/training_dataset_{train,val}_ful
 ### Post-v4 diagnostics: baselines, trend confound, and sample-mix artifacts
 
 Cheap, evaluation-only analyses run after the v4 CV (scripts:
-`scripts/physics_baselines.py`, `scripts/climatology_baseline.py`; results
+`scripts/04_baselines/physics_baselines.py`, `scripts/04_baselines/climatology_baseline.py`; results
 `models/cv_year_holdout_v4/{physics_baselines,climatology_baseline}.json`).
 Baselines use the v4 train+val files, i.e. ~7% fewer samples than the CV test
 sets (buffer-dropped samples) -- comparison is approximate, not sample-identical.
@@ -1210,7 +1210,7 @@ sets (buffer-dropped samples) -- comparison is approximate, not sample-identical
   positives skew to short lead: bin 0 has 2x the positive cells of bin 1 (9,778
   vs 4,924; active frac 60.5% vs 26.6%), and per-cell positive rate is 1.4e-4
   vs ~5e-5 over all hourly runs. Quantified below
-  (`scripts/diagnose_sample_mix.py` -> `models/cv_year_holdout_v4/
+  (`scripts/05_year_cv_diagnostics/diagnose_sample_mix.py` -> `models/cv_year_holdout_v4/
   sample_mix_diagnostics.json`; per-fold cached scores in
   `data/interim/diag_scores/`; 12 folds, both model sets, full v4 test years).
 
@@ -1269,8 +1269,8 @@ sets (buffer-dropped samples) -- comparison is approximate, not sample-identical
 ### Seed-variance study and ensembles (changes how every earlier comparison should be read)
 
 v4 14-feature U-Net CV recipe retrained with seeds 1 and 2 on folds 2016/2020/2024
-(seed 0 = the existing v4 CV model); scripts `scripts/run_seed_study.sh`,
-`scripts/seed_study_eval.py`, `scripts/ensemble_followup.py` (`cross_validate_year.py`
+(seed 0 = the existing v4 CV model); scripts `scripts/06_seed_ensemble_ema/run_seed_study.sh`,
+`scripts/06_seed_ensemble_ema/seed_study_eval.py`, `scripts/06_seed_ensemble_ema/ensemble_followup.py` (`cross_validate_year.py`
 gained `--seed`); results in `models/seed_study/`. Predictions were pre-registered in the
 notebook before results.
 
@@ -1304,8 +1304,8 @@ notebook before results.
   U-Net vs. GBT (2.1-2.9x), U-Net vs. physics baselines (~3-4x) and climatology (~30x).
   The calendar-year skill trend should be re-checked on ensembles (single-seed trend r=0.79;
   2-model ensemble r=0.86).
-- **Instability vs. metric noise (day-block bootstrap, `scripts/bootstrap_stability.py`,
-  `scripts/ensemble_stability.py`; notebook Part 3; decision rule written before looking):
+- **Instability vs. metric noise (day-block bootstrap, `scripts/05_year_cv_diagnostics/bootstrap_stability.py`,
+  `scripts/06_seed_ensemble_ema/ensemble_stability.py`; notebook Part 3; decision rule written before looking):
   the models are genuinely unstable -- not "stable".** Resampling the test *dates* with
   one fixed model moves a year's AUC-PR by ~16% (relative SD; ~+/-30% 95% intervals; 2014's
   95 days far noisier) -- this metric noise is real and is NOT reduced by ensembling. But the
@@ -1327,7 +1327,7 @@ notebook before results.
   flattened by ~epoch 5 in earlier runs -- gentler loss); verify with two disjoint 3-member
   ensembles (3 more seeds on the 3 seed folds, ~7h).
 - **Ensemble-size study (notebook Part 4; seeds 3/4/5 added on folds 2016/2020/2024 ->
-  six seeds per fold; `scripts/ensemble_size.py`, results `models/seed_study/ensemble_size.json`).**
+  six seeds per fold; `scripts/06_seed_ensemble_ema/ensemble_size.py`, results `models/seed_study/ensemble_size.json`).**
   Disjoint-ensemble disagreement (mean relative AUC-PR gap) falls **25.5% (single) -> 13.0% (2
   members) -> 9.5% (3 members)**; the share of splits differing beyond day-resampling noise falls
   56% -> 33% -> 20% (2024 alone: 50% at k=3). **Pre-registered criterion (gap <=8% AND <=20% of
@@ -1347,7 +1347,7 @@ notebook before results.
   members per fold and were found exchangeable).
 - **Weight-averaging (EMA) study (notebook Part 5; `training.train_model(ema_decays=...)`, default off, tests
   verify tracking the average does not change training; `cross_validate_year.py --ema-decays`;
-  `scripts/run_ema_study.sh`, `scripts/ema_eval.py`, results `models/ema_study/ema_eval.json`).** Seeds 10/11/12
+  `scripts/06_seed_ensemble_ema/run_ema_study.sh`, `scripts/06_seed_ensemble_ema/ema_eval.py`, results `models/ema_study/ema_eval.json`).** Seeds 10/11/12
   on folds 2016/2020/2024; plain and averaged weights saved from the same run (paired). **Pre-registered
   outcome "works" for EMA decay 0.9999 (~4-epoch horizon):** C1 seed CV 10.4% -> 3.7% (ratio 0.36) PASS;
   C2 pooled AUC-PR +2.9% PASS; C4 disjoint-pair gap 12.7% -> 4.7% (ratio 0.37; pairs beyond test noise
@@ -1360,7 +1360,7 @@ notebook before results.
   gaps, and 3-seed CVs range 9%-34% across seed groups. Minimum detectable effect for a 12-fold paired
   comparison: ~21% with one seed per fold, ~12% with three. About a third (not half) of the single-seed 12-fold CV
   variance is seed noise.
-- **Direct 4-member plain-ensemble test (8 unselected seeds 1-5,10-12; `scripts/ensemble_size.py --extra-raw-seeds
+- **Direct 4-member plain-ensemble test (8 unselected seeds 1-5,10-12; `scripts/06_seed_ensemble_ema/ensemble_size.py --extra-raw-seeds
   10 11 12 --exclude-s0 --max-k 4`, `models/seed_study/ensemble_size_8seeds.json`): near miss, and my extrapolation
   was too optimistic.** Disjoint plain ensembles disagree by 22.5% / 11.3% / 9.2% / 8.2% at 1/2/3/4 members, with
   50% / 30% / 26% / 25% of splits beyond test noise (2024 ~49% at k=4) -- the gap flattens, not 1/k. Gain over a
@@ -1373,7 +1373,7 @@ notebook before results.
   EMA, ~7h). Plain ensembles need >=5 and still sit near the criterion at 4.
 - **Averaged-ensemble stability test (notebook Part 6; seeds 13/14/15 with EMA 0.9999 added on folds
   2016/2020/2024 -> six averaged and six plain models per fold from the same runs, seeds 10-15;
-  `scripts/ema_eval.py --seeds 10..15`, `scripts/ensemble_size.py --emastudy-variant {raw,ema0.9999}`; outputs
+  `scripts/06_seed_ensemble_ema/ema_eval.py --seeds 10..15`, `scripts/06_seed_ensemble_ema/ensemble_size.py --emastudy-variant {raw,ema0.9999}`; outputs
   `models/ema_study/ema_eval_6seeds.json`, `ens_size_6seeds_{raw,ema0.9999}.json`).** Disjoint-ensemble
   criterion (gap <=8% AND <=20% of splits beyond day-resampling noise), pooled over 3 folds:
   **averaged 3-vs-3 MEETS it (gap 6.9%, 6/30 = 20.0% beyond noise -- exactly at the line); plain 3-vs-3 does not
@@ -1403,8 +1403,8 @@ notebook before results.
   by luck of ordering. `cross_validate_year.py` now aligns the test set to the training order (a no-op when they match) and
   `uh_eval.py` aligns each model's scoring set to its checkpoint's order, then asserts. Training itself was never affected.
 - **UH re-test with averaged ensembles (notebook Part 7; UH 2-5 km only = 14 base + `uh_2_5km` mean/max = 16 features,
-  EMA 0.9999, seeds 10-12, folds 2016/2020/2024; `scripts/run_uh_study.sh`, `scripts/uh_eval.py`, exploratory
-  `scripts/uh_pairs_exploratory.py`; results `models/uh_study/uh_eval.json`, `uh_pairs_exploratory.json`) -- trained on the
+  EMA 0.9999, seeds 10-12, folds 2016/2020/2024; `scripts/07_updraft_helicity/run_uh_study.sh`, `scripts/07_updraft_helicity/uh_eval.py`, exploratory
+  `scripts/07_updraft_helicity/uh_pairs_exploratory.py`; results `models/uh_study/uh_eval.json`, `uh_pairs_exploratory.json`) -- trained on the
   same 4,919 runs/splits as the baseline averaged models, so only the UH features differ. The original "UH hurts" result is
   NOT reproduced.** Pre-registered rule outcome: **no detectable pooled effect** (E = +0.3%; neither "hurts" nor "helps"
   met). Per fold the UH 3-member ensemble vs. the 20 baseline 3-member ensembles: **2016 +12.6%** (z=+2.7, above all 20, paired
@@ -1419,8 +1419,8 @@ notebook before results.
   years). Not tested: 0-2/0-3 km UH layers and the full 21-feature set. If revisited: 3 more UH seeds on 2016/2024 (6 vs 6) and
   the HRRR-v4-era folds (2022-2025).
 - **UH testing finished (notebook Part 8; 3 more UH 2-5 km seeds 13-15 -> 6 UH vs the 6 baseline averaged models, plus the full 21-feature
-  set (all UH layers, 0-2/0-3 km zero-filled + `uh_layers_available`), seeds 10-12; folds 2016/2020/2024; `scripts/run_uh_all.sh`,
-  `scripts/run_uh21_study.sh`, `scripts/run_uh_part8_eval.sh`, `scripts/uh_eval.py --study-dir/--keep-uh-columns/--tag`; results
+  set (all UH layers, 0-2/0-3 km zero-filled + `uh_layers_available`), seeds 10-12; folds 2016/2020/2024; `scripts/07_updraft_helicity/run_uh_all.sh`,
+  `scripts/07_updraft_helicity/run_uh21_study.sh`, `scripts/07_updraft_helicity/run_uh_part8_eval.sh`, `scripts/07_updraft_helicity/uh_eval.py --study-dir/--keep-uh-columns/--tag`; results
   `models/uh_study/uh_eval_6seeds.json`, `uh_eval_13_15.json`, `models/uh21_study/uh21_eval.json`).** Pre-registered rule outcome for both:
   **no detectable effect** (8A 6v6 pooled +4.4%, folds +9.5/+10.1/-6.3%; new seeds alone +7.1/+4.0/+1.0%; 8B 21 features +1.0%, folds
   +10.0/+1.3/-8.2%; "helps" needed pooled >= +8%). **Part 7's fold-level results do not hold up:** the 2024 -17.5% came from one weak UH
@@ -1441,7 +1441,7 @@ notebook before results.
 
 ### Validation against a documented case
 
-`scripts/validate_documented_case.py` spot-checks the grid/time-bin/
+`scripts/01_data_pipeline/validate_documented_case.py` spot-checks the grid/time-bin/
 label/feature pipeline against one specific, real, well-documented
 tornado: the EF4 that touched down in Arkansas at 2021-12-11 01:07 UTC
 and tracked ~81 miles into Tennessee (SPC `event_id 2021_2112101907-01`)
@@ -1539,7 +1539,7 @@ baseline, explicitly not a final architecture:
 
 `training.train_model()` wires `DenseGridDataset` + `QuietMapDownsampler`
 + `FocalLoss` + a given model into an actual training loop, used by
-`scripts/train_model.py`.
+`scripts/03_architecture_search/train_model.py`.
 
 - **Determinism split across two seeding responsibilities.**
   `train_model()`'s only training-time source of randomness (which
@@ -1547,7 +1547,7 @@ baseline, explicitly not a final architecture:
   `seed` argument, independent of torch's global RNG. Model weight
   *initialization* happens outside `train_model()` (in the caller), so
   full end-to-end reproducibility requires `torch.manual_seed(seed)`
-  before constructing the model — `scripts/train_model.py` does this;
+  before constructing the model — `scripts/03_architecture_search/train_model.py` does this;
   verified in `tests/test_training.py::test_train_model_is_deterministic_given_same_seed`.
 - **No train/val split.** At the pilot's 6-sample scale a formal split
   isn't meaningful — the script trains on all samples and reports
@@ -1559,7 +1559,7 @@ baseline, explicitly not a final architecture:
   inference script to reconstruct the exact model without
   re-deriving anything from the dataset.
 - **First real run** (`models/tornado_cnn_pilot.pt`, gitignored —
-  regenerable via `scripts/train_model.py`): loss dropped from 0.0712
+  regenerable via `scripts/03_architecture_search/train_model.py`): loss dropped from 0.0712
   to 0.0007 over 50 epochs on the pilot's 6 samples — the model fits
   this tiny dataset, as expected (memorization, not generalization;
   see "Consolidated training dataset" above for why the pilot is
@@ -1573,7 +1573,7 @@ baseline, explicitly not a final architecture:
 
 `src/tornado_predictor/inference.py` loads a checkpoint, predicts a
 per-cell probability map for a sample, and sanity-checks it against
-that sample's known positive labels, via `scripts/run_inference.py`.
+that sample's known positive labels, via `scripts/03_architecture_search/run_inference.py`.
 
 - **`assert_feature_order_matches` is a real correctness guard, not
   boilerplate.** The dataset's feature channel order must exactly
@@ -1655,7 +1655,7 @@ project's model, for the exact same real tornado.
 ### Train/val split (locked in)
 
 `src/tornado_predictor/split.py` splits a `run_bins` list into
-train/val without leakage, via `scripts/build_training_dataset.py`
+train/val without leakage, via `scripts/02_dataset_build/build_training_dataset.py`
 (now produces two files instead of one) and `training.train_model()`
 (now optionally tracks val loss per epoch via `training.evaluate()`).
 
@@ -1762,7 +1762,7 @@ swept.
 Following a literature-review roadmap's Tier 1 (see "Genuine held-out
 test set" and "Gradient-boosted trees" above): a real 3-way
 train/test/val split now exists (`split_run_bins_3way`,
-`scripts/build_3way_split.py`), revealing that the U-Net's real,
+`scripts/02_dataset_build/build_3way_split.py`), revealing that the U-Net's real,
 never-touched-before test AUC-PR (**0.0836**) is more than double its
 old, repeatedly-checked val number — a genuine finding about
 single-split variance at this data scale, not a bug. A gradient-boosted
@@ -1806,11 +1806,11 @@ as Trello-style starter-prompt tickets rather than implemented yet.
 - SPC tornado reports (2014–2025) downloaded and parsed to
   `data/processed/spc_tornado_reports_2014_2025.csv` (15,294 reports),
   including full track geometry (`path_wkt`) — see
-  `scripts/download_spc_tornado_reports.py`. Range extended from an
+  `scripts/01_data_pipeline/download_spc_tornado_reports.py`. Range extended from an
   initial, arbitrarily-chosen 2012–2022 (picked to loosely match the
   sibling TorNet project) once the real HRRR-archive-availability
   question was actually investigated (see "Time binning" above).
-- HRRR pulls via Herbie confirmed working (`scripts/smoke_test_herbie.py`).
+- HRRR pulls via Herbie confirmed working (`scripts/01_data_pipeline/smoke_test_herbie.py`).
 - The ~40km grid is defined (see above): `src/tornado_predictor/grid.py`.
 - The 0–8h per-run time-binning scheme is defined (see above):
   `src/tornado_predictor/time_bins.py`.
@@ -1841,12 +1841,12 @@ as Trello-style starter-prompt tickets rather than implemented yet.
 - A baseline CNN architecture (`TornadoCNN`) is implemented and tested
   against the real pilot dataset, including a full gradient check (see
   above): `src/tornado_predictor/model.py`.
-- A training loop (`training.train_model()`, `scripts/train_model.py`)
+- A training loop (`training.train_model()`, `scripts/03_architecture_search/train_model.py`)
   is implemented and has been run end-to-end on the pilot dataset (see
   above) — loss dropped from 0.0712 to 0.0007 over 50 epochs.
 - Inference + a training-set-fit sanity check + visualization are
   implemented and run end-to-end (see above):
-  `src/tornado_predictor/inference.py`, `scripts/run_inference.py`,
+  `src/tornado_predictor/inference.py`, `scripts/03_architecture_search/run_inference.py`,
   `outputs/inference_pilot.png`. Model consistently, meaningfully
   separates positive from negative cells (~40-90x), but absolute
   positive-class probabilities are modest (~0.3, not near-1.0) — traced
@@ -1873,12 +1873,12 @@ as Trello-style starter-prompt tickets rather than implemented yet.
 ## Repo layout
 
 - `src/tornado_predictor/` — package code (installed editable via `pyproject.toml`)
-- `scripts/` — CLI entry points (data download/parsing, grid building, one-off verification)
+- `scripts/` — CLI entry points, grouped by project phase in numbered subdirectories (`01_data_pipeline/` … `08_canada_transfer/`); see `scripts/README.md`
 - `data/raw/` — raw HRRR pulls, raw SPC report files (gitignored contents)
 - `data/interim/` — regridded/aligned intermediate data (gitignored contents)
 - `data/processed/` — final gridded sample tables ready for modeling (gitignored contents)
-- `models/` — trained model checkpoints (gitignored contents, regenerable via `scripts/train_model.py`)
-- `outputs/` — generated visualizations (gitignored contents, regenerable via `scripts/run_inference.py`)
+- `models/` — trained model checkpoints (gitignored contents, regenerable via `scripts/03_architecture_search/train_model.py`)
+- `outputs/` — generated visualizations (gitignored contents, regenerable via `scripts/03_architecture_search/run_inference.py`)
 - `notebooks/` — exploratory work
 - `tests/`
 
