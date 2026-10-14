@@ -142,7 +142,7 @@ def main():
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(out, indent=1))
     pooled = float(np.mean(effects))
-    n_pos, n_neg = sum(e > 0 for e in effects), sum(e < 0 for e in effects)
+    n_pos, n_neg = int(sum(e > 0 for e in effects)), int(sum(e < 0 for e in effects))
     need = int(np.ceil(2 * len(effects) / 3))
     verdict = "helps" if pooled >= 0.08 and n_pos >= need else "hurts" if pooled <= -0.08 and n_neg >= need else "no detectable effect"
     print(f"\nPooled effect {100 * pooled:+.1f}% ({n_pos} folds positive, {n_neg} negative of {len(effects)}) -> pre-registered rule: {verdict}")

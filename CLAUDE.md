@@ -1763,7 +1763,7 @@ gitignored mask is not built). Does not touch the grid, labels, features or any 
   model switch. An inquiry about NTP data access was sent to the Northern Tornadoes Project
   (no reply recorded here).
 
-### US-only baseline (mask non-US cells from loss and metrics): Stage A done, Stage B built but not run
+### US-only baseline (mask non-US cells from loss and metrics): Stage A and Stage B done
 
 Because SPC has no Canadian/Mexican labels, those cells (1,909 of 11,178: CA 1,243, MX 659, other land 7) are always labeled 0
 (see "Country mask" above). `cell_mask.py` defines the **US-trusted mask** (`country` in {water, US}, 9,269 cells kept); `FocalLoss`
@@ -1782,12 +1782,19 @@ match the unmasked baseline; a map whose only positive is in an excluded cell co
   negatives barely moves current metrics** -- the model already gives those cells low probability. Mean predicted p (v4, pooled): US 0.0128, CA 0.0027,
   MX 0.0038 (CA peaks in July, 0.0042, consistent with the summer severe season). This does NOT show the label noise is harmless for training (the models
   still learned from it) or say anything about Canadian skill (no Canadian labels exist to test it).
-- **Stage B (masked-loss retrain; `scripts/08_canada_transfer/run_us_only_study.sh`, evaluator `us_only_eval.py`):** code, tests and a 2-epoch smoke
-  run (fold 2014, seed 10: provenance saved correctly) done; the full run (EMA 0.9999, seeds 10-12, folds 2016/2020/2024, ~7-8 h CPU) has NOT been run.
-  It is compared on US-trusted cells only against the existing unmasked-trained averaged models (seeds 10-15). Pre-registered rule: "helps" if pooled
-  ensemble AUC-PR >= +8% and positive in >= 2/3 folds; "hurts" if <= -8% and negative in >= 2/3; else no detectable effect. Descriptive extra: mean predicted p
-  over CA/MX cells for masked vs unmasked training (does unmasked training suppress probability over cells it was always told were negative?).
-  Stage C (add NTP/ECCC Canadian labels, compare against this US-only baseline) is a separate, not-yet-planned ticket.
+- **Stage B (masked-loss retrain; `scripts/08_canada_transfer/run_us_only_study.sh`, evaluator `us_only_eval.py`, results `models/us_only_study/us_only_eval.json`):**
+  EMA 0.9999, seeds 10-12, folds 2016/2020/2024, Canada/Mexico/other-land cells excluded from loss and metrics, inputs keep the full grid. Scored on
+  US-trusted cells only against the unmasked-trained averaged models (seeds 10-15; 20 three-member baseline ensembles). **Pre-registered rule outcome:
+  no detectable effect.** 3-member ensemble AUC-PR vs. the mean of the 20 baseline triples: 2016 0.0398 vs 0.0408 (-2.4%, 35th pct), 2020 0.0623 vs 0.0578
+  (+7.9%, above all 20), 2024 0.0718 vs 0.0722 (-0.5%, 45th pct); pooled +1.7%, positive in 1/3 folds ("helps" needed >= +8% and 2/3 folds). Against the matched
+  triple (seeds 10-12) the paired day-bootstrap intervals include 0 in all three folds. Best-F1 and precision/recall at best-F1 are within a few percent
+  (2020 recall 0.221 vs 0.226; 2016 recall 0.187 vs 0.158 but precision 0.080 vs 0.085). Single-model AUC-PR spread is large as usual (2016 US-only seeds 0.0429/0.0205/0.0277).
+  **Conclusion: masking unlabeled cells from the training loss gives no detectable change in US skill; this US-only model is a valid clean baseline, not a better one.**
+  Descriptive: mean predicted p over Canadian cells is HIGHER with masked training (2016/2020/2024: 0.0037/0.0060/0.0042 vs 0.0016/0.0014/0.0009 for unmasked training; MX similar),
+  consistent with unmasked training having pushed probability down over cells it was always told were negative, and masked models no longer being penalized there. US cells
+  are within +/-10% either way (0.0111/0.0111/0.0104 vs 0.0124/0.0105/0.0113). This is the expected direction, not a measure of Canadian skill (no Canadian labels exist).
+  An earlier launch of this run failed instantly (bare `python` hit a broken pyenv shim because the venv was not activated; `tee` hid the exit code); it was relaunched with
+  the venv active. Stage C (add NTP/ECCC Canadian labels, compare against this US-only baseline) is a separate, not-yet-planned ticket.
 
 ## Current status
 
