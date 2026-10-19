@@ -171,10 +171,17 @@ def uh_layers_available_value(init_time) -> float:
     return float(pd.Timestamp(init_time) >= UH_EXTRA_LAYERS_AVAILABLE_FROM)
 
 
-def pull_all_fields(init_time, fxx: int) -> dict[str, np.ndarray]:
-    """Pulls every field in FIELD_SPECS and combines the 0-6km shear
-    components into a single magnitude field."""
-    raw = {name: pull_field_value(init_time, fxx, name, search) for name, search in FIELD_SPECS}
+def field_specs(include_uh: bool = True) -> list[tuple[str, str]]:
+    """FIELD_SPECS, optionally without the updraft-helicity fields. The
+    live forecast path only needs the 14 base features, so it skips the 3
+    UH pulls per fxx (include_uh=False); everything else uses the default."""
+    return [(n, s) for n, s in FIELD_SPECS if include_uh or not n.startswith("uh_")]
+
+
+def pull_all_fields(init_time, fxx: int, include_uh: bool = True) -> dict[str, np.ndarray]:
+    """Pulls every field in FIELD_SPECS (minus UH if include_uh=False) and
+    combines the 0-6km shear components into a single magnitude field."""
+    raw = {name: pull_field_value(init_time, fxx, name, search) for name, search in field_specs(include_uh)}
     shear_0_6km = np.hypot(raw.pop("shear_u_0_6km"), raw.pop("shear_v_0_6km"))
     return {**raw, "shear_0_6km": shear_0_6km}
 
@@ -192,12 +199,13 @@ def pool_field_to_grid(field: np.ndarray, grid: HrrrCoarseGrid) -> tuple[np.ndar
     return blocks.mean(axis=(1, 3)), blocks.max(axis=(1, 3))
 
 
-def extract_features(init_time, fxx: int, grid: HrrrCoarseGrid) -> xr.Dataset:
+def extract_features(init_time, fxx: int, grid: HrrrCoarseGrid, include_uh: bool = True) -> xr.Dataset:
     """Pulls all fields for (init_time, fxx) and pools each onto grid,
     returning a Dataset of <field>_mean/<field>_max variables over
-    (row, col)."""
+    (row, col). include_uh=False omits the UH variables and the
+    uh_layers_available indicator (live forecast path: 14 base features)."""
     init_time = str(init_time)
-    fields = pull_all_fields(init_time, fxx)
+    fields = pull_all_fields(init_time, fxx, include_uh=include_uh)
 
     data_vars = {
         "lat": (("row", "col"), grid.lat_center, {"units": "degrees_north"}),
@@ -212,17 +220,18 @@ def extract_features(init_time, fxx: int, grid: HrrrCoarseGrid) -> xr.Dataset:
     # Single indicator variable (not split mean/max -- it's a per-run
     # constant, not a pooled physical field), always present regardless
     # of whether this run actually has any NaN fields.
-    data_vars["uh_layers_available"] = (
-        ("row", "col"),
-        np.full((grid.n_rows, grid.n_cols), uh_layers_available_value(init_time)),
-        {"long_name": "1.0 if 0-2km/0-3km updraft helicity are real (not NaN) for this run, else 0.0"},
-    )
+    if include_uh:
+        data_vars["uh_layers_available"] = (
+            ("row", "col"),
+            np.full((grid.n_rows, grid.n_cols), uh_layers_available_value(init_time)),
+            {"long_name": "1.0 if 0-2km/0-3km updraft helicity are real (not NaN) for this run, else 0.0"},
+        )
 
     valid_time = (np.datetime64(init_time) + np.timedelta64(fxx, "h")).astype("datetime64[s]")
 
     # netCDF attrs must be strings/numbers/arrays thereof, not nested
     # dicts -- record each field's search string under its own key.
-    search_attrs = {f"search_{name}": search for name, search in FIELD_SPECS}
+    search_attrs = {f"search_{name}": search for name, search in field_specs(include_uh)}
 
     return xr.Dataset(
         data_vars=data_vars,

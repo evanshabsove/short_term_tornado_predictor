@@ -81,3 +81,12 @@ def test_mean_never_exceeds_max():
     field = rng.normal(size=(HRRR_NY, HRRR_NX))
     mean, max_ = pool_field_to_grid(field, GRID)
     assert (mean <= max_ + 1e-12).all()
+
+
+def test_field_specs_without_uh_is_the_eight_base_pulls_and_default_is_unchanged():
+    from tornado_predictor.features import FIELD_SPECS, field_specs
+
+    assert field_specs() == FIELD_SPECS
+    base = field_specs(include_uh=False)
+    assert [n for n, _ in base] == ["cape", "cin", "srh_0_1km", "srh_0_3km", "shear_u_0_6km", "shear_v_0_6km", "t2m", "d2m"]
+    assert all(pair in FIELD_SPECS for pair in base)

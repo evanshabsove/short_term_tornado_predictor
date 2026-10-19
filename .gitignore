@@ -38,6 +38,11 @@ data/processed/*
 # Trained model weights (regenerable via scripts/03_architecture_search/train_model.py)
 models/*
 !models/.gitkeep
+# The production bundle's small provenance file (member hashes, recipe, training data) is tracked;
+# the checkpoints themselves stay ignored via *.pt below.
+!models/production/
+models/production/*
+!models/production/manifest.json
 *.pt
 *.pth
 
