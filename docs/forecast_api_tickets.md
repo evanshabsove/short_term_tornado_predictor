@@ -37,6 +37,8 @@ Tickets 1, 2 and 6 in parallel; then 3, 5 and 4 (4 alongside); 7 needs 3 and 6; 
 
 ### 1. Production model bundle: 5-member EMA ensemble, trained on all years
 
+**Status: done 2026-10-19** (bundle `3c02381f1611`; results and caveats in CLAUDE.md, "Forecast API for the Rails app").
+
 **Description:** Train a 5-member ensemble of U-Nets on all available years, the model the
 forecast API will serve. Add a tested `predict_ensemble` that averages member probabilities and
 checks feature order, plus a manifest recording what was trained and how.
@@ -76,6 +78,8 @@ checks feature order, plus a manifest recording what was trained and how.
 
 ### 2. Live HRRR feature extraction with a train/serve parity test
 
+**Status: done 2026-10-19** (`src/tornado_predictor/live_features.py`; parity test passes on two historical runs).
+
 **Description:** Add a function that finds the latest complete HRRR run, pulls fxx=0 (bin 0) and
 fxx=4 (bin 1), and builds the exact 14-channel input the model trained on. A parity test replays a
 historical run through this path and compares it with the stored training features.
@@ -93,6 +97,9 @@ historical run through this path and compares it with the stored training featur
 > 3-5% of archive pulls. Plan before coding.
 
 ### 3. Forecast store (disk-backed archive of raw ensemble output)
+
+**Status: done 2026-10-19** (`src/tornado_predictor/forecast_store.py`, 38 tests in `tests/test_forecast_store.py`; `HrrrCoarseGrid.grid_id` added in `grid.py`; `data/live/` gitignored).
+Layout: `data/live/<issued|replay>/<YYYY-MM-DDTHHZ>/{forecast.npz,meta.json}`; `put` is atomic (temp dir + rename) and never overwrites; `prune` only runs when called with an age limit.
 
 **Description:** A small module that atomically writes each issued forecast to disk and reads it
 back, with a retention policy. It replaces tornet's in-memory cache so restarts lose nothing and
@@ -117,6 +124,9 @@ forecasts.
 > they can't be mistaken for issued forecasts. Depends on ticket 1's manifest id. Plan first.
 
 ### 4. Risk tiers on a neighborhood-smoothed score (and a calibration decision)
+
+**Status: done 2026-10-20** (`src/tornado_predictor/tiers.py`, 27 tests; `scripts/09_serving/tier_study.py`; plan `docs/tier_study_preregistration.md`; results `docs/tier_study_results.md` and `models/tiers/tier_study.json`).
+Outcome: max 3x3 smoothing; Elevated >= 0.122, High >= 0.190 (`ts-e2c497b6`); High hit rate 13.9% per cell, Low holds 40% of tornado cells; calibrated percentage **not** defensible by the pre-registered rule (C1 narrowly failed); `/tiers` filled in `api/README.md`. Real hour-to-hour tier flicker is deferred to the live archive.
 
 **Description:** Turn the ensemble's raw per-cell scores into three honest tiers (Low / Elevated /
 High) on a neighborhood-smoothed score, with each tier's meaning backed by measured numbers from
@@ -163,6 +173,9 @@ fails, tiers are the only display, which is an acceptable outcome. This gates th
 
 ### 5. Hourly forecast scheduler (separate process)
 
+**Status: done 2026-10-20** (`src/tornado_predictor/forecast_job.py`, `scripts/09_serving/run_forecast_job.py`, 26 tests in `tests/test_forecast_job.py`; verified on the real latest HRRR runs, second pass a no-op).
+Retry cap per failing run (default 3) and a job lockfile were added beyond the original brief; `status.json` lives at `<store root>/status.json`.
+
 **Description:** A CLI job that runs once per hour, finds the newest complete HRRR run, runs the
 ensemble and writes to the forecast store. It skips runs already done and can backfill gaps after
 downtime.
@@ -176,6 +189,8 @@ downtime.
 > init+50-60 min. Don't do any calibration here (ticket 4). Plan first.
 
 ### 6. Flask API contract and README
+
+**Status: done 2026-10-19** (`api/README.md`; payload sizes and mesh fidelity measured against the real grid).
 
 **Description:** Specify the response shapes before building, written the way tornet's
 `api/README.md` is: route tables, field meanings and error codes. This is the contract the Rails

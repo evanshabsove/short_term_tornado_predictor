@@ -1,6 +1,6 @@
 # Tornado Forecast API (contract)
 
-> **Status: contract only.** Nothing here is implemented yet. This document is what the Flask API (ticket 7)
+> **Status: contract only.** Nothing here is served yet (the `/tiers` numbers are filled in from ticket 4). This document is what the Flask API (ticket 7)
 > and the Rails frontend (tickets 9-10) both code against. Changing a response shape is a coordinated change
 > with the Rails app, as with the tornet API's `/predict`.
 
@@ -140,7 +140,7 @@ Stored forecasts, newest first.
       "age_seconds": 3820,
       "stale": false,
       "bundle_id": "e0dc23a53c86",
-      "tier_set_id": "ts-0001"
+      "tier_set_id": "ts-e2c497b6"
     }
   ]
 }
@@ -168,7 +168,7 @@ One forecast: both time bins. `latest` is the newest stored run; `<id>` is a for
     "trained_years": { "first": 2014, "last": 2025 }
   },
   "tiering": {
-    "tier_set_id": "ts-0001",
+    "tier_set_id": "ts-e2c497b6",
     "smoothing": { "operator": "max", "radius_cells": 1 }
   },
   "calibrated_percent": null,
@@ -202,27 +202,39 @@ not a confidence interval).
 
 ### `GET /tiers`
 
-What each tier means, with the measured evidence behind it. The shape is fixed now; the numbers are `null`
-until ticket 4 produces them.
+What each tier means, with the measured evidence behind it (ticket 4; full results in `docs/tier_study_results.md`).
+Values below are the real ones for tier set `ts-e2c497b6`.
 
 ```json
 {
   "schema_version": 1,
-  "tier_set_id": "ts-0001",
+  "tier_set_id": "ts-e2c497b6",
   "smoothing": { "operator": "max", "radius_cells": 1 },
-  "basis": null,
+  "basis": {
+    "ensemble": "proxy: 2-model leave-one-year-out ensemble (not the served 5-member ensemble)",
+    "sample": "init 20Z runs, 2014-2025 (4,410 samples), held-out years",
+    "hit_definition": "a tornado touched the cell or one of its 8 neighbours (~40 km) in that 4-hour bin",
+    "cutoffs_checked_on": "5-member EMA ensembles, 2016/2020/2024: High hit rate 13.9% [10.3, 17.6]",
+    "era_note": "High hit rate was 10.3% in 2015-2020 and 19.8% in 2021-2025"
+  },
   "tiers": [
-    { "code": 0, "name": "Low", "description": "No notably elevated relative risk.", "area_share": null, "capture_share": null, "hit_rate": null },
-    { "code": 1, "name": "Elevated", "description": "Elevated relative risk.", "area_share": null, "capture_share": null, "hit_rate": null },
-    { "code": 2, "name": "High", "description": "Highest relative risk.", "area_share": null, "capture_share": null, "hit_rate": null }
+    { "code": 0, "name": "Low", "description": "Lower relative risk. Not a safe cell.",
+      "area_share": 0.9977, "capture_share": 0.399, "hit_rate": 0.00012, "hit_rate_ci95": [0.00010, 0.00014] },
+    { "code": 1, "name": "Elevated", "description": "Elevated relative risk.",
+      "area_share": 0.0020, "capture_share": 0.337, "hit_rate": 0.039, "hit_rate_ci95": [0.033, 0.044] },
+    { "code": 2, "name": "High", "description": "Highest relative risk.",
+      "area_share": 0.00035, "capture_share": 0.263, "hit_rate": 0.139, "hit_rate_ci95": [0.117, 0.160] }
   ],
   "no_coverage": { "code": -1, "name": "No model coverage", "description": "Canada, Mexico and other land: no tornado labels exist there, so no skill is claimed." }
 }
 ```
 
-`area_share` is the fraction of the domain in the tier, `capture_share` the fraction of tornado cells inside it,
-and `hit_rate` the fraction of its cells that verified, all measured on held-out data and defined in ticket 4.
-`basis` will describe the sample and verification radius those numbers came from.
+`area_share` is the fraction of covered cells (US land and water, over all maps, so it is tiny) in the tier, `capture_share` the
+fraction of tornado cells inside it (**Low holds 40%**), and `hit_rate` the fraction of its cells that verified. Tiers are exclusive.
+`hit_rate_ci95` is a day-block bootstrap interval. The cutoffs themselves stay server-side (they are scores on an uncalibrated
+scale), in `models/tiers/tier_study.json` under `serving`, keyed by `tier_set_id`; the Flask layer (ticket 7) reads them from there.
+`GET /forecast/*` carries the same `tier_set_id`. A calibrated percentage was **not** found defensible (see the results doc), so
+no percentage field exists.
 
 ### Reserved for later
 
@@ -239,8 +251,12 @@ These come from the tier design (ticket 4) and apply to any client:
 - Show **Low / Elevated / High** and a separate grey **no model coverage** state. Never render a no-coverage cell as Low.
 - Do **not** show percentages. The raw probabilities are not calibrated, and the old tornet-detector cutoffs
   (0.1 / 0.4) must not be reused: this model's scores sit on a different scale.
-- "High" means *highest relative risk*, not "likely": even at the best operating point most flagged cells
-  do not verify. Avoid "low chance" phrasing; a Low cell is not a safe cell.
+- "High" means *highest relative risk*, not "likely": about 1 in 7 High cells verified, so most do not. A Low
+  cell is not a safe cell: 40% of tornado cells fell in Low. Say "lower relative risk", never "low chance" or "safe".
+- If hit rates are shown, use the measured sentence and its caveats, e.g. "In past forecasts, about 14% of High cells had a
+  tornado within ~40 km in that 4-hour window (about 10% in 2015-2020, 20% in 2021-2025)". Never turn it into a
+  per-forecast probability, and say it was measured on a proxy ensemble.
+- Expect most runs to show **no High cells** (about 11% of afternoon runs have any); an empty High tier is normal, not a failure.
 - Show the **valid window** and the **age**, and flag `stale` forecasts.
 
 ## Caching
