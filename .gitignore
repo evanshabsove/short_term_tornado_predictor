@@ -28,6 +28,9 @@ data/processed/*
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/processed/.gitkeep
+# Live forecast archive written by the scheduler (issued forecasts are the verification record)
+data/live/*
+!data/live/.gitkeep
 *.grib2
 *.grib2.*.idx
 *.nc
@@ -43,6 +46,10 @@ models/*
 !models/production/
 models/production/*
 !models/production/manifest.json
+# The tier study's results (serving cutoffs + tier_set_id the API reads) are small and tracked.
+!models/tiers/
+models/tiers/*
+!models/tiers/tier_study.json
 *.pt
 *.pth
 

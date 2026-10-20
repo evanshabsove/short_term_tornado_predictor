@@ -17,6 +17,8 @@ this module for anything beyond exploratory use.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -87,6 +89,27 @@ class HrrrCoarseGrid:
     lon_center: np.ndarray  # shape (n_rows, n_cols)
     crs_proj4: str = NATIVE_LCC_PROJ4
     geodetic_crs_proj4: str = SPHERICAL_LONLAT_PROJ4
+
+    @property
+    def grid_id(self) -> str:
+        """12-hex-char id of the grid's geometry (projection, stride, shape,
+        origin, spacing). Stored with each forecast and served by the API so a
+        client can tell when its cached grid no longer matches a forecast.
+        Derived from the defining constants, not the cell-center arrays, so it
+        is stable across platforms (no floating-point array hashing)."""
+        payload = json.dumps(
+            {
+                "crs": self.crs_proj4,
+                "geodetic": self.geodetic_crs_proj4,
+                "stride": self.stride,
+                "shape": [self.n_rows, self.n_cols],
+                "cell_size_m": round(self.cell_size_m, 3),
+                "origin_xy_m": [round(self.origin_x_m, 3), round(self.origin_y_m, 3)],
+                "native_dxy_m": [self.native_dx_m, self.native_dy_m],
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
     @property
     def x_min_m(self) -> float:
