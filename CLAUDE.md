@@ -1796,7 +1796,7 @@ match the unmasked baseline; a map whose only positive is in an excluded cell co
   An earlier launch of this run failed instantly (bare `python` hit a broken pyenv shim because the venv was not activated; `tee` hid the exit code); it was relaunched with
   the venv active. Stage C (add NTP/ECCC Canadian labels, compare against this US-only baseline) is a separate, not-yet-planned ticket.
 
-### Forecast API for the Rails app (side track; tickets 1-6 of 11 done)
+### Forecast API for the Rails app (side track; tickets 1-7 of 11 done)
 
 Goal: serve the HRRR U-Net ensemble to the sibling Rails app (`../tornado_prediction_radar`) through a Flask API modeled on `../tornet/api/`.
 The full ticket set (title/description/starter prompt per ticket, plus the decisions behind it) is `docs/forecast_api_tickets.md`; the contract is
@@ -1858,7 +1858,18 @@ The full ticket set (title/description/starter prompt per ticket, plus the decis
     show percentages. The criterion was not relaxed after seeing the result; revising it needs a new pre-registration.
   - **Stability:** disjoint 3-member ensembles agree on 55% of High cells (Jaccard 0.554); hour-to-hour flicker could not be measured (only 20 consecutive-hour run pairs in the staged data) -- deferred to the live archive.
   - **Predictions scored:** P1, P6 met; P2 (High area 0.3-3%) missed by ~10x (observed 0.035%), P3 (Elevated cap binds) and P4 (cutoffs fail to transfer) wrong, P5 right that it fails but wrong on which criterion.
-- **Not done:** tickets 7-11 (Flask implementation, replay, Rails pages, deployment). No percentage field exists; the API should serve tiers only.
+- **Ticket 7, Flask API (`src/tornado_predictor/forecast_api.py` builders without Flask, `forecast_app.py` factory, `api/app.py`; contract `api/README.md`).**
+  Routes `/health`, `/status`, `/grid`, `/forecasts`, `/forecast/latest`, `/forecast/<id>`, `/tiers` on :5060, read-only over the store: importing it never loads torch/herbie or the scheduler (tested in a fresh interpreter), no
+  background thread, no writes (tested). Tiers are computed per request from the stored raw ensemble mean by `tiers.tier_forecast` -- smooth, quantize to float16, compare with the cutoffs, the exact order the tier study
+  measured -- using `models/tiers/tier_study.json`; the app refuses to start if that file's `tier_set_id` does not match its own recomputation. `/tiers` numbers are read from the study file at runtime. Added
+  `HrrrCoarseGrid.vertex_lonlat()` for the `/grid` mesh and pinned `flask`, `flask-cors` and their dependencies in `requirements.txt`.
+  **Verified over real HTTP** against the two real forecasts (01Z, 02Z 2026-10-20): every route answers in 2-28 ms, process RSS 157 MB, `/forecast/latest` is 200,528 B raw / 17,123 B gzip, served tiers equal a direct
+  computation, 304 and CORS preflight work, an empty store gives `/forecasts` 200 (empty) and `/forecast/latest` 503 + `Retry-After: 300`. Both real forecasts are quiet-night maps with **no Elevated or High cells**, so the
+  tier boundaries are covered by synthetic-peak tests (a score exactly at a cutoff goes up a tier; a score a full float16 step below stays down; the 3x3 spread; Canada/Mexico cells stay -1 whatever their score), not by a real severe case.
+  **Two corrections to ticket 6's contract found while building:** the README's "vertex mesh within 5.5 m" was a per-axis figure -- over all 11,398 vertices the 4-decimal rounding moves a corner up to 5.6 m per axis and 7.4 m as a
+  distance (now stated); and `age_seconds` cannot be trusted after a 304 because the ETag does not change with time (clients compute age from `init_time`). flask-cors 6.x answers a wildcard policy by echoing the caller's origin.
+  Needs the gitignored country mask at startup (a deployment item for ticket 11). Nothing is scheduled yet, so `/status` reports `stale` until `run_forecast_job.py` is run on a timer.
+- **Not done:** tickets 8-11 (replay and SPC reports, Rails pages, deployment). No percentage field exists; the API serves tiers only.
 
 ## Current status
 

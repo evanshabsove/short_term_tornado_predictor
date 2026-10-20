@@ -223,6 +223,9 @@ needs.
 
 ### 7. Flask API implementation
 
+**Status: done 2026-10-20** (`src/tornado_predictor/forecast_api.py` builders, `forecast_app.py` Flask factory, `api/app.py` entrypoint; 63 new tests; verified over real HTTP against the real `data/live/` archive).
+Decisions made in implementation: `/forecasts` on an empty store is 200 with an empty list (only `/forecast/latest` is 503); clients compute age from `init_time` because a 304 keeps an old `age_seconds`; a stored forecast whose grid does not match is a logged 500, never silently tiered; tiers use the same smooth -> float16 -> cutoff path the tier study measured (`tiers.tier_forecast`).
+
 **Description:** Implement the routes from ticket 6 as a thin read-only layer over the forecast
 store, with the same error handling, CORS and `/health` conventions as tornet.
 

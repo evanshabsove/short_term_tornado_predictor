@@ -1,8 +1,8 @@
-# Tornado Forecast API (contract)
+# Tornado Forecast API
 
-> **Status: contract only.** Nothing here is served yet (the `/tiers` numbers are filled in from ticket 4). This document is what the Flask API (ticket 7)
-> and the Rails frontend (tickets 9-10) both code against. Changing a response shape is a coordinated change
-> with the Rails app, as with the tornet API's `/predict`.
+> **Status: implemented (ticket 7).** Served by `api/app.py` (code: `src/tornado_predictor/forecast_app.py` and `forecast_api.py`).
+> This document is what the Flask API and the Rails frontend (tickets 9-10) both code against. Changing a response shape is a
+> coordinated change with the Rails app, as with the tornet API's `/predict`.
 
 Flask API serving the short-range tornado **forecast** produced by this repo's HRRR-based U-Net ensemble
 (0-8 h, two 4-hour bins per hourly HRRR run, ~39 km grid cells). It is the forecasting counterpart of the
@@ -22,7 +22,7 @@ No request handler loads a model or pulls HRRR data.
 | Cache | in-memory, lost on restart | on disk; every issued forecast is kept |
 | Display unit | percentage (0-100, UI multiplies) | **three tiers**, not a percentage (see "Presentation rules") |
 
-## Setup (planned)
+## Setup
 
 ```bash
 python api/app.py          # serves on :5060 (override with PORT)
@@ -31,9 +31,14 @@ python api/app.py          # serves on :5060 (override with PORT)
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `5060` | Port the Flask server binds to |
+| `FORECAST_STORE_ROOT` | `data/live` | Directory holding `issued/` (written by the scheduler) and `status.json` |
 | `FORECAST_STALE_AFTER_SECONDS` | `10800` (3 h) | A forecast whose run is older than this is flagged `stale: true` |
+| `FORECAST_CORS_ORIGINS` | `*` | `*`, or a comma-separated list of allowed origins (ticket 11 sets this for production) |
 
-Further variables (forecast store location, allowed CORS origins) are decided in tickets 3, 7 and 11.
+The API needs the tracked tier results (`models/tiers/tier_study.json`) and the gitignored country mask
+(`data/processed/hrrr_coarse_grid_stride13_countries.nc`), and refuses to start without them, or if the tier file's
+`tier_set_id` does not match the one recomputed from its own cutoffs. It never loads a model, pulls HRRR data, writes to the
+store or starts a background thread: fill the store with `scripts/09_serving/run_forecast_job.py`.
 The Rails app reads the base URL from `FORECAST_API_BASE_URL` (default `http://localhost:5060`).
 
 ## Conventions
@@ -120,7 +125,8 @@ training data (SPC reports are US-only), so no skill is claimed there.
 
 ### `GET /forecasts`
 
-Stored forecasts, newest first.
+Stored forecasts, newest first. An empty store is **not** an error here: `200` with `count: 0`, `latest_id: null` and an
+empty list (only `GET /forecast/latest` is `503`). `latest_id` is the newest stored forecast even when `since` filters the list to nothing.
 
 | Query param | Default | Description |
 |---|---|---|
@@ -187,14 +193,14 @@ One forecast: both time bins. `latest` is the newest stored run; `<id>` is a for
 
 | Field | Meaning |
 |---|---|
-| `age_seconds` | Now minus **`init_time`**. The age of the model run, which is what matters to a forecaster. |
+| `age_seconds` | Now minus **`init_time`**, as of this response (never negative). The age of the model run, which is what matters to a forecaster. The `ETag` does not change with time, so a revalidated `304` leaves the client with its older body: **compute age from `init_time` client-side** rather than trusting a cached `age_seconds`. |
 | `stale` | `age_seconds` exceeds `FORECAST_STALE_AFTER_SECONDS`. A stale forecast is still returned with `200`. |
 | `grid_id` | Must equal `/grid`'s `grid_id`; if it differs, refetch `/grid`. |
 | `model` | Which production bundle produced it. `trained_years` matters for historical replays, which are retrospective, not held-out tests (ticket 8). |
 | `tiering` | Which tier set and smoothing produced `tiers`. Tiers are derived from the stored raw ensemble output, so they can be re-derived if the cutoffs change (the id changes with them). |
 | `calibrated_percent` | Reserved. `null` unless ticket 4 concluded a calibrated percentage is defensible, in which case a per-bin percent array is added. |
 | `tiers` | Per cell: `-1` no coverage, `0` Low, `1` Elevated, `2` High. Computed server-side; clients never compute tiers. |
-| `smoothed_score` | The neighbourhood-smoothed ensemble score the tiers are cut from. **Uncalibrated relative index; do not display it as a percentage.** For hover text and ordering only. |
+| `smoothed_score` | The neighbourhood-smoothed ensemble score the tiers are cut from. **Uncalibrated relative index; do not display it as a percentage.** For hover text and ordering only. Quantized to float16 (the precision the tiers were measured at) and rounded to 4 decimals. |
 
 Raw per-member probabilities and the member spread are stored by the scheduler but are **not** part of this
 contract by default: they are uncalibrated, and the spread's meaning is untested (it is a disagreement signal,
@@ -214,8 +220,11 @@ Values below are the real ones for tier set `ts-e2c497b6`.
     "ensemble": "proxy: 2-model leave-one-year-out ensemble (not the served 5-member ensemble)",
     "sample": "init 20Z runs, 2014-2025 (4,410 samples), held-out years",
     "hit_definition": "a tornado touched the cell or one of its 8 neighbours (~40 km) in that 4-hour bin",
-    "cutoffs_checked_on": "5-member EMA ensembles, 2016/2020/2024: High hit rate 13.9% [10.3, 17.6]",
-    "era_note": "High hit rate was 10.3% in 2015-2020 and 19.8% in 2021-2025"
+    "cutoffs_checked_on": {
+      "description": "5-member EMA ensembles, 2016/2020/2024",
+      "high_hit_rate": 0.139, "high_hit_rate_ci95": [0.103, 0.176]
+    },
+    "high_hit_rate_by_era": { "2015-2020": 0.103, "2021-2025": 0.198 }
   },
   "tiers": [
     { "code": 0, "name": "Low", "description": "Lower relative risk. Not a safe cell.",
@@ -232,7 +241,8 @@ Values below are the real ones for tier set `ts-e2c497b6`.
 `area_share` is the fraction of covered cells (US land and water, over all maps, so it is tiny) in the tier, `capture_share` the
 fraction of tornado cells inside it (**Low holds 40%**), and `hit_rate` the fraction of its cells that verified. Tiers are exclusive.
 `hit_rate_ci95` is a day-block bootstrap interval. The cutoffs themselves stay server-side (they are scores on an uncalibrated
-scale), in `models/tiers/tier_study.json` under `serving`, keyed by `tier_set_id`; the Flask layer (ticket 7) reads them from there.
+scale), in `models/tiers/tier_study.json` under `serving`, keyed by `tier_set_id`; the API reads them at startup.
+Every number in this response is read from that file at runtime, so a new tier set only needs a new study file.
 `GET /forecast/*` carries the same `tier_set_id`. A calibrated percentage was **not** found defensible (see the results doc), so
 no percentage field exists.
 
@@ -276,11 +286,12 @@ Conditional requests (`If-None-Match`) return `304`. Compression (gzip) is a dep
 | Payload | Raw JSON | gzip |
 |---|---|---|
 | `/grid` (vertex mesh + country) | 219 KB | 76 KB |
-| `/forecast/<id>` (2 bins x tiers + score) | 200 KB | 36 KB |
+| `/forecast/<id>` (2 bins x tiers + score) | 200 KB | 17 KB (a real, quiet forecast; an active map compresses worse) |
 | (rejected) full cell polygons | 883 KB | 162 KB |
 
 Budget: a forecast stays under 300 KB raw. The vertex mesh reproduces every one of the 11,178 cells' corners
-(from `HrrrCoarseGrid.cell_polygon`) to within 5.5 m, which is just the 4-decimal rounding.
+(from `HrrrCoarseGrid.cell_polygon`) exactly before rounding; the 4-decimal rounding moves a vertex by at most 5.6 m
+in either axis, 7.4 m as a distance (measured over all 11,398 vertices; an earlier version of this note said 5.5 m, which was the per-axis figure).
 
 ## Errors
 
@@ -288,18 +299,18 @@ Budget: a forecast stays under 300 KB raw. The vertex mesh reproduces every one 
 |---|---|
 | `400` | Malformed forecast id, bad `limit`/`since` |
 | `404` | Forecast id not stored; unknown route |
-| `503` | No forecast has been issued yet (empty store); sends `Retry-After: 300` |
-| `500` | Unexpected error (body is `{"error": "Internal server error"}`; details only in the server log) |
+| `503` | `GET /forecast/latest` only: no forecast has been issued yet (empty store); sends `Retry-After: 300` |
+| `500` | Unexpected error, or a stored forecast that does not match the running API (different `grid_id` or shape, unreadable files). Body is `{"error": "Internal server error"}`; details only in the server log |
 
 A **stale** forecast is never an error: it is returned with `stale: true`.
 
-## Quick test (once implemented)
+## Quick test
 
 ```bash
 curl http://localhost:5060/health
 curl http://localhost:5060/status
 curl http://localhost:5060/grid
-curl http://localhost:5060/forecasts?limit=3
+curl 'http://localhost:5060/forecasts?limit=3'
 curl http://localhost:5060/forecast/latest
 curl http://localhost:5060/forecast/2026-10-19T01Z
 curl http://localhost:5060/tiers
