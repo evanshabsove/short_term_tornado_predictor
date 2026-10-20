@@ -371,3 +371,42 @@ def test_match_levels_scale_shift_recovers_area_shares():
     # after matching, the share above a reference cutoff is close to the reference's own share
     cutoff = float(np.quantile(ref.astype("float32"), 0.95))
     assert abs((mapped >= cutoff).mean() - (ref.astype("float32") >= cutoff).mean()) < 0.02
+
+
+# --- serving path ---
+
+
+def test_tier_forecast_matches_the_study_order_of_operations():
+    rng = np.random.default_rng(12)
+    mean = (rng.random((2, 9, 11)) ** 4 * 0.4).astype("float32")
+    cov = np.ones((9, 11), bool)
+    cov[0, :] = False
+    cutoffs = {"elevated": float(np.float16(0.05)), "high": float(np.float16(0.15))}
+    tiers_out, smoothed = tiers.tier_forecast(mean, "max", 1, cutoffs, cov)
+    study = assign_tiers(quantize(smooth(mean, "max", 1)).astype("float32"), cutoffs, cov)
+    np.testing.assert_array_equal(tiers_out, study)
+    assert smoothed.dtype == np.float32 and tiers_out.dtype == np.int8
+    assert (tiers_out[:, 0, :] == -1).all()
+    # the returned score is already quantized, so it round-trips through float16 unchanged
+    np.testing.assert_array_equal(smoothed, smoothed.astype("float16").astype("float32"))
+
+
+def test_tier_forecast_quantizes_before_comparing_with_the_cutoff():
+    cutoff = float(np.float16(0.1224365234375))
+    below_raw = np.float32(cutoff - 0.00002)  # under the cutoff in float32; within half a float16 step, so it rounds up to it
+    assert below_raw < cutoff and np.float16(below_raw) == np.float16(cutoff)
+    mean = np.zeros((3, 3), "float32")
+    mean[1, 1] = below_raw
+    tiers_out, _ = tiers.tier_forecast(mean, "max", 0, {"elevated": cutoff, "high": 0.5}, np.ones((3, 3), bool))
+    assert tiers_out[1, 1] == 1  # served tiers must agree with how the study counted this cell
+
+
+def test_tier_forecast_single_map_and_batch_agree():
+    rng = np.random.default_rng(13)
+    mean = (rng.random((2, 6, 7)) * 0.3).astype("float32")
+    cov = np.ones((6, 7), bool)
+    cut = {"elevated": 0.1, "high": 0.2}
+    batch, _ = tiers.tier_forecast(mean, "max", 1, cut, cov)
+    for i in range(2):
+        single, _ = tiers.tier_forecast(mean[i], "max", 1, cut, cov)
+        np.testing.assert_array_equal(single, batch[i])

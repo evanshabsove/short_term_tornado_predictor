@@ -93,6 +93,21 @@ def assign_tiers(smoothed: np.ndarray, cutoffs: dict, coverage: np.ndarray) -> n
     return tiers
 
 
+def tier_forecast(
+    mean: np.ndarray, operator: str, radius: int, cutoffs: dict, coverage: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """The single serving path from raw ensemble probabilities to tiers:
+    smooth, quantize to float16, then compare with the cutoffs. This is exactly
+    the order the tier study measured (scores are quantized after smoothing and
+    a cell is in a tier when its quantized score is at or above the cutoff), so
+    a served tier means what the study's table says it means.
+
+    mean: `(H, W)` or `(N, H, W)` probabilities. Returns `(tiers, smoothed)`:
+    int8 tier codes and the quantized smoothed score as float32."""
+    smoothed = quantize(smooth(mean, operator, radius)).astype(np.float32)
+    return assign_tiers(smoothed, cutoffs, coverage), smoothed
+
+
 def tier_set_id(operator: str, radius: int, cutoffs: dict) -> str:
     """`ts-` + 8 hex chars; changes whenever the operator, radius or either
     cutoff (to 6 significant figures) does."""

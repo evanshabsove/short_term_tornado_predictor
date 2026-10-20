@@ -149,6 +149,17 @@ class HrrrCoarseGrid:
         lon, lat = xy_to_lonlat(corner_x, corner_y, self.crs_proj4, self.geodetic_crs_proj4)
         return [Polygon(zip(lon[i], lat[i])) for i in range(len(rows))]
 
+    def vertex_lonlat(self) -> tuple[np.ndarray, np.ndarray]:
+        """(lon, lat) of the shared lattice of cell corners, each of shape
+        (n_rows + 1, n_cols + 1). Vertex (i, j) is the south-west corner of
+        cell (i, j); cell (row, col) has corners (row, col), (row, col + 1),
+        (row + 1, col + 1), (row + 1, col). Neighbouring cells share vertices,
+        so this is the compact form of every cell_polygon."""
+        xs = self.x_min_m + np.arange(self.n_cols + 1) * self.cell_size_m
+        ys = self.y_min_m + np.arange(self.n_rows + 1) * self.cell_size_m
+        x, y = np.meshgrid(xs, ys)
+        return xy_to_lonlat(x, y, self.crs_proj4, self.geodetic_crs_proj4)
+
     def assign_cells(self, lon, lat):
         """Vectorized lon/lat -> (row, col). Out-of-bounds or non-finite
         input gets sentinel -1 (never raises)."""
