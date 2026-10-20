@@ -1,0 +1,125 @@
+{
+  "bundle_id": "3c02381f1611",
+  "created_utc": "2026-10-19T08:10:40.235362+00:00",
+  "git": {
+    "commit": "d39f3f8296b946989d2d4da2a086e003e53bfcaa",
+    "dirty": false
+  },
+  "recipe": {
+    "model_class": "TornadoUNet",
+    "base_channels": 16,
+    "alpha": 0.25,
+    "gamma": 2.0,
+    "lr": 0.001,
+    "batch_size": 2,
+    "quiet_keep_fraction": 0.2,
+    "epochs": 50,
+    "ema_decay": 0.9999,
+    "cell_mask": "none",
+    "combine": "plain mean of member probabilities"
+  },
+  "feature_names": [
+    "cape_mean",
+    "cape_max",
+    "cin_mean",
+    "cin_max",
+    "srh_0_1km_mean",
+    "srh_0_1km_max",
+    "srh_0_3km_mean",
+    "srh_0_3km_max",
+    "t2m_mean",
+    "t2m_max",
+    "d2m_mean",
+    "d2m_max",
+    "shear_0_6km_mean",
+    "shear_0_6km_max"
+  ],
+  "members": [
+    {
+      "path": "member_seed20.pt",
+      "sha256": "f0c68ccb45d82782f7c5eec6e9127c9e9c1d7310d41e5df876f026197b44b03e",
+      "seed": 20,
+      "ema_decay": 0.9999,
+      "final_train_loss": 0.00012932140116101874,
+      "train_seconds": 4662.731341123581
+    },
+    {
+      "path": "member_seed21.pt",
+      "sha256": "6a44158e19c2208a1a38951461680e8705297229a728a8629398b23614b7b180",
+      "seed": 21,
+      "ema_decay": 0.9999,
+      "final_train_loss": 0.0001323579334208618,
+      "train_seconds": 2944.2220838069916
+    },
+    {
+      "path": "member_seed22.pt",
+      "sha256": "6b40bdbb11dac860922f3775c7a733f738ed0e1d9bd9f3f2b21faf4b694c0590",
+      "seed": 22,
+      "ema_decay": 0.9999,
+      "final_train_loss": 0.00013023642641720628,
+      "train_seconds": 2844.1540772914886
+    },
+    {
+      "path": "member_seed23.pt",
+      "sha256": "0b966af9fe3d2819e83527a134380f0c90305a9014ac424d951fabd2f17b25a2",
+      "seed": 23,
+      "ema_decay": 0.9999,
+      "final_train_loss": 0.00013600079760057112,
+      "train_seconds": 2804.1943266391754
+    },
+    {
+      "path": "member_seed24.pt",
+      "sha256": "79b977e2e51ae222810e2d77fe4e3673f917bfaeae309721abea21adb4483d2f",
+      "seed": 24,
+      "ema_decay": 0.9999,
+      "final_train_loss": 0.00013269327427887584,
+      "train_seconds": 2810.2008950710297
+    }
+  ],
+  "training_data": {
+    "source_manifest": "/Users/evanshabsove/Documents/tornado_reserch_paper/short_term_tornado_predictor/data/interim/scaled_build_v2/manifest.json",
+    "n_runs": 4919,
+    "n_samples": 9838,
+    "n_active_samples": 4254,
+    "active_fraction": 0.4324049603577963,
+    "n_positive_cells": 15814,
+    "years": [
+      2014,
+      2015,
+      2016,
+      2017,
+      2018,
+      2019,
+      2020,
+      2021,
+      2022,
+      2023,
+      2024,
+      2025
+    ],
+    "first_init": "2014-09-01 00:00:00",
+    "last_init": "2025-12-29 00:00:00",
+    "n_runs_after_2025_09_09": 37,
+    "note_post_ceiling_runs": "Runs after 2025-09-09 are active-date runs only (quiet dates were selected up to the old label ceiling); 36 of ~4,900 runs, negligible but recorded.",
+    "dropped_columns": [
+      "uh_0_2km_mean",
+      "uh_0_2km_max",
+      "uh_0_3km_mean",
+      "uh_0_3km_max",
+      "uh_2_5km_mean",
+      "uh_2_5km_max",
+      "uh_layers_available"
+    ],
+    "load_seconds": 3805.5401632785797
+  },
+  "expected_skill": {
+    "held_out_score_for_these_weights": null,
+    "why": "every year 2014-2025 is in the training set, so there is no held-out evaluation of these exact weights",
+    "reference": "12-fold leave-one-year-out CV of the same recipe (CLAUDE.md): single seed AUC-PR ~0.044-0.049 (+/-~19-25% seed noise); 2-model ensemble 0.0532; deployment-like expectation ~0.02-0.03 (CV mix is richer in positives than an all-hourly-runs stream).",
+    "caveats": [
+      "Ensembling reduces model variance only; the accuracy ceiling is unchanged.",
+      "Raw probabilities are uncalibrated (focal loss alpha=0.25, non-natural sample mix).",
+      "Member spread is a disagreement signal of untested meaning, not a confidence interval."
+    ]
+  }
+}

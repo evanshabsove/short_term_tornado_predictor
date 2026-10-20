@@ -9,8 +9,8 @@ and that the ensemble works -- it does not measure skill:
      (same recipe; ~0.00015 expected).
   2. Agreement: pairwise correlation between members' probability maps, and the
      ensemble's spread, on a sample of runs.
-  3. Level: mean predicted probability over US-trusted cells vs. the CV models'
-     pooled value (~0.0128; approximate, since the sample mixes differ).
+  3. Level: mean predicted probability over US-trusted cells vs. the CV EMA
+     models scored on the same default sample (0.0064-0.0084).
   4. In-sample AUC-PR for each member and for the ensemble, printed under a
      "TRAINING-SET FIT, NOT SKILL" header. It exists to catch a broken model
      (near the no-skill rate), not to be quoted.
@@ -40,7 +40,10 @@ from tornado_predictor.time_bins import N_BINS
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STAGING_DIR = REPO_ROOT / "data" / "interim" / "scaled_build_v2"
 CV_PLAIN_CHECKPOINTS = "models/ema_study/seed*/tornado_unet_heldout_*.pt"  # plain (non-EMA) files carry loss_history
-CV_US_MEAN_PROBA = 0.0128  # CLAUDE.md, Stage A: mean predicted p over US cells, v4 CV models, pooled
+# Mean predicted p over US-trusted cells for the 9 CV EMA(0.9999) models (seeds 10-12, folds 2016/2020/2024), scored on
+# THIS script's default sample (200 evenly spaced runs, 2026-10-19): 0.0064-0.0084. Like-for-like on purpose --
+# CLAUDE.md's Stage A figure (~0.0128, pooled over held-out test years) is a different sample and not comparable.
+CV_US_MEAN_PROBA_RANGE = (0.0064, 0.0084)
 
 
 def cv_final_losses() -> list[float]:
@@ -106,8 +109,9 @@ def main() -> None:
     print(f"   spread across members: mean {spread.mean():.5f}, max {spread.max():.4f} (nonzero => members differ)")
 
     us_mean = float(mean[:, us].mean())
+    lo, hi = CV_US_MEAN_PROBA_RANGE
     print(f"\n3. mean ensemble probability over US-trusted cells: {us_mean:.4f} "
-          f"(CV models, pooled: ~{CV_US_MEAN_PROBA}; sample mixes differ, so approximate)")
+          f"(CV EMA models on the default {200}-run sample: {lo}-{hi}; only comparable with --n-runs 200)")
 
     print("\n4. TRAINING-SET FIT, NOT SKILL (every run is in the training set)")
     y_flat = y[:, us].ravel()
