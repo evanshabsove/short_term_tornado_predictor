@@ -83,3 +83,28 @@ def store_root(tmp_path):
 @pytest.fixture
 def store(store_root):
     return ForecastStore(store_root, "issued")
+
+
+REPORT_ROWS = [
+    # event_id, timestamp_utc, start_lat, start_lon, end_lat, end_lon, length_mi, width_yd, path_wkt, ef_rating, state
+    ("2024_a-01", "2024-04-26 18:30:00", 41.0, -96.0, 41.1, -95.8, 12.5, 400, "LINESTRING (-96 41, -95.8 41.1)", 2.0, "NE"),
+    ("2024_b-01", "2024-04-26 19:10:00", 40.5, -95.0, 40.5, -95.0, 0.3, 25, "LINESTRING (-95 40.5, -95 40.5)", float("nan"), "IA"),
+    ("2024_c-01", "2024-04-26 23:59:00", 39.0, -94.0, 39.2, -93.9, 3.0, 60, "LINESTRING (-94 39, -93.9 39.2)", 0.0, "MO"),
+    ("2024_d-01", "2024-04-27 00:00:00", 38.0, -97.0, 38.1, -96.9, 2.0, 50, "LINESTRING (-97 38, -96.9 38.1)", 1.0, "KS"),
+    ("2024_e-01", "2024-05-30 12:00:00", 35.0, -99.0, 35.2, -98.7, 8.0, 150, "LINESTRING (-99 35, -98.7 35.2)", 3.0, "OK"),
+]
+
+
+@pytest.fixture
+def reports_csv(tmp_path):
+    import pandas as pd
+
+    path = tmp_path / "reports.csv"
+    pd.DataFrame(REPORT_ROWS, columns=["event_id", "timestamp_utc", "start_lat", "start_lon", "end_lat", "end_lon",
+                                       "length_mi", "width_yd", "path_wkt", "ef_rating", "state"]).to_csv(path, index=False)
+    return path
+
+
+@pytest.fixture
+def replay_store(store_root):
+    return ForecastStore(store_root, "replay")

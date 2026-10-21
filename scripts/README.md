@@ -15,7 +15,7 @@ from the repo root inside the project venv, e.g.
 | `06_seed_ensemble_ema/` | Seed-variance, ensemble-size/stability and EMA weight-averaging studies | `seed_study_eval`, `ensemble_followup`, `ensemble_size`, `ensemble_stability`, `ema_eval`, `run_seed_study.sh`, `run_ema_study.sh` |
 | `07_updraft_helicity/` | UH data augmentation and the UH ablation studies | `augment_dataset_fields`, `run_uh_study.sh`, `run_uh21_study.sh`, `run_uh_all.sh`, `run_uh_part8_eval.sh`, `uh_eval`, `uh_pairs_exploratory` |
 | `08_canada_transfer/` | Country mask and Canadian domain coverage (long-term transfer-learning goal) | `build_country_mask`, `plot_country_mask` |
-| `09_serving/` | Production ensemble and live HRRR inputs for the forecast API (`api/README.md`) | `train_production_ensemble`, `live_features_smoke`, `run_forecast_job`, `tier_study` |
+| `09_serving/` | Production ensemble and live HRRR inputs for the forecast API (`api/README.md`) | `train_production_ensemble`, `live_features_smoke`, `run_forecast_job`, `run_replay`, `tier_study` |
 
 Notes:
 - Scripts in `06_` and `07_` import helpers (`diagnose_sample_mix`,

@@ -19,6 +19,7 @@ payload: they are uncalibrated and the spread's meaning is untested.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,10 @@ from tornado_predictor import tiers as T
 from tornado_predictor.cell_mask import load_country, us_trusted_mask
 from tornado_predictor.forecast_store import ForecastStore, parse_forecast_id
 from tornado_predictor.grid import HrrrCoarseGrid, build_coarse_grid
+from tornado_predictor.replay_cases import REPLAY_CASES, case_for
+from tornado_predictor.spc_reports import DEFAULT_REPORTS_PATH, MAX_SPAN_DAYS, ReportsCatalog
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 STATUS_FILENAME = "status.json"
@@ -74,6 +79,13 @@ class NoForecast(ApiError):
     """Nothing has been issued yet: 503 with Retry-After."""
 
     status = 503
+    retry_after = RETRY_AFTER_SECONDS
+
+
+class Unavailable(ApiError):
+    """A data file the route needs is not installed: 503, and retrying will not help."""
+
+    status = 503
 
 
 class ServerFault(ApiError):
@@ -109,6 +121,25 @@ def parse_since(value: str) -> pd.Timestamp:
     except ValueError as e:
         raise BadRequest(f"since is not a valid datetime: {value!r}") from e
     return ts.tz_convert("UTC").tz_localize(None) if ts.tzinfo is not None else ts
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_time(value: str | None, name: str) -> pd.Timestamp:
+    """A required query parameter: a forecast id, a full ISO-8601 datetime, or a
+    plain date (`2026-10-19`, midnight UTC), as naive UTC."""
+    if value is None:
+        raise BadRequest(f"{name} is required")
+    if _DATE_RE.match(value):
+        try:
+            return pd.Timestamp(value)
+        except ValueError as e:
+            raise BadRequest(f"{name} is not a valid date: {value!r}") from e
+    try:
+        return parse_since(value)
+    except BadRequest:
+        raise BadRequest(f"{name} must be a date (YYYY-MM-DD), a forecast id (YYYY-MM-DDTHHZ) or an ISO-8601 datetime, got {value!r}") from None
 
 
 def parse_limit(value: str | None) -> int:
@@ -159,6 +190,8 @@ class TierConfig:
 @dataclass
 class ServingContext:
     store: ForecastStore
+    replay_store: ForecastStore
+    reports: ReportsCatalog | None
     grid: HrrrCoarseGrid
     country: np.ndarray
     tiers: TierConfig
@@ -182,6 +215,7 @@ class ServingContext:
         tier_config: TierConfig | None = None,
         stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
         now: Callable[[], pd.Timestamp] = utc_now,
+        reports_path: Path | str | None = DEFAULT_REPORTS_PATH,
     ) -> "ServingContext":
         store_root = Path(store_root)
         if country is None:
@@ -191,8 +225,16 @@ class ServingContext:
                 raise FileNotFoundError(
                     f"{e}; build the country mask with scripts/08_canada_transfer/build_country_mask.py"
                 ) from e
+        reports = None
+        if reports_path is not None:
+            try:
+                reports = ReportsCatalog.load(reports_path)
+            except FileNotFoundError:
+                logger.warning("SPC reports file %s not found: GET /reports will answer 503", reports_path)
         return cls(
             store=ForecastStore(store_root, "issued"),
+            replay_store=ForecastStore(store_root, "replay"),
+            reports=reports,
             grid=grid if grid is not None else build_coarse_grid(),
             country=np.asarray(country),
             tiers=tier_config if tier_config is not None else TierConfig.load(),
@@ -286,13 +328,26 @@ def build_forecasts(ctx: ServingContext, limit: int = DEFAULT_LIMIT, since: pd.T
 
 
 def forecast_etag(meta: dict, tiers: TierConfig) -> str:
-    return f"{meta['id']}-{meta['bundle_id']}-{tiers.tier_set_id}"
+    suffix = "-replay" if meta.get("namespace") == "replay" else ""
+    return f"{meta['id']}-{meta['bundle_id']}-{tiers.tier_set_id}{suffix}"
 
 
-def build_forecast(ctx: ServingContext, forecast_id: str) -> tuple[dict, str]:
-    """`forecast_id` is a forecast id such as 2026-10-19T01Z, or "latest"."""
-    if forecast_id == "latest":
-        stored = ctx.store.latest()
+def retrospective_note(meta: dict) -> str:
+    years = meta.get("trained_years")
+    span = f"{years['first']}-{years['last']}" if years else "an unrecorded range of years"
+    return (
+        f"Retrospective: the served model was trained on {span}, which includes this date, so this replay "
+        "illustrates the model's output on a past case. It is not a held-out test."
+    )
+
+
+def build_forecast(ctx: ServingContext, forecast_id: str, *, replay: bool = False) -> tuple[dict, str]:
+    """`forecast_id` is a forecast id such as 2026-10-19T01Z; live forecasts also
+    accept "latest". With replay=True the id is looked up in the replay namespace
+    (computed offline by scripts/09_serving/run_replay.py; the API never computes one)."""
+    store = ctx.replay_store if replay else ctx.store
+    if forecast_id == "latest" and not replay:
+        stored = store.latest()
         if stored is None:
             raise NoForecast("No forecast has been issued yet")
     else:
@@ -301,9 +356,10 @@ def build_forecast(ctx: ServingContext, forecast_id: str) -> tuple[dict, str]:
         except ValueError as e:
             raise BadRequest(str(e)) from e
         try:
-            stored = ctx.store.get(init)
+            stored = store.get(init)
         except KeyError:
-            raise NotFound(f"No forecast stored for {forecast_id}") from None
+            hint = "; compute it with scripts/09_serving/run_replay.py" if replay else ""
+            raise NotFound(f"No {'replay' if replay else 'forecast'} stored for {forecast_id}{hint}") from None
 
     meta, grid = stored.meta, ctx.grid
     if meta["grid_id"] != grid.grid_id or tuple(stored.mean.shape[1:]) != (grid.n_rows, grid.n_cols):
@@ -323,15 +379,19 @@ def build_forecast(ctx: ServingContext, forecast_id: str) -> tuple[dict, str]:
             "tiers": tier_arr[i].ravel().tolist(),
             "smoothed_score": np.round(smoothed[i].astype(np.float64), SCORE_DECIMALS).ravel().tolist(),
         })
-    age = ctx.age_seconds(meta["init_time"])
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "id": meta["id"],
-        "mode": "live",
+    payload = {"schema_version": SCHEMA_VERSION, "id": meta["id"], "mode": "replay" if replay else "live"}
+    if replay:
+        # a replay's "age" and "stale" are meaningless (the run is years old), so they are null, not misleading numbers
+        payload.update(retrospective=True, trained_on_years=meta.get("trained_years"), note=retrospective_note(meta))
+        age = stale = None
+    else:
+        age = ctx.age_seconds(meta["init_time"])
+        stale = ctx.is_stale(age)
+    payload.update({
         "init_time": meta["init_time"],
         "generated_at": meta["generated_at"],
         "age_seconds": age,
-        "stale": ctx.is_stale(age),
+        "stale": stale,
         "grid_id": meta["grid_id"],
         "shape": [grid.n_rows, grid.n_cols],
         "model": {"bundle_id": meta["bundle_id"], "n_members": meta["n_members"], "trained_years": meta.get("trained_years")},
@@ -341,7 +401,40 @@ def build_forecast(ctx: ServingContext, forecast_id: str) -> tuple[dict, str]:
         },
         "calibrated_percent": None,
         "bins": bins,
-    }, forecast_etag(meta, ctx.tiers)
+    })
+    return payload, forecast_etag(meta, ctx.tiers)
+
+
+def build_replays(ctx: ServingContext, limit: int = DEFAULT_LIMIT, since: pd.Timestamp | None = None) -> tuple[dict, None]:
+    """Stored replays (newest first) and the curated cases with which of their runs are available."""
+    metas = ctx.replay_store.list(limit=limit, since=since)
+    items = []
+    for m in metas:
+        case = case_for(m["id"])
+        items.append({
+            "id": m["id"], "init_time": m["init_time"], "generated_at": m["generated_at"],
+            "bundle_id": m["bundle_id"], "tier_set_id": ctx.tiers.tier_set_id,
+            "case": case["key"] if case else None,
+        })
+    stored_ids = {m["id"] for m in ctx.replay_store.list()}
+    cases = [
+        {"key": c["key"], "label": c["label"],
+         "runs": [{"id": i, "init_time": iso_z(parse_forecast_id(i)), "available": i in stored_ids} for i in c["init_times"]]}
+        for c in REPLAY_CASES
+    ]
+    return {"schema_version": SCHEMA_VERSION, "count": len(items), "cases": cases, "replays": items}, None
+
+
+def build_reports(ctx: ServingContext, start: str | None, end: str | None) -> tuple[dict, None]:
+    """SPC tornado reports in [start, end) as GeoJSON (touchdown points and tracks)."""
+    if ctx.reports is None:
+        raise Unavailable("SPC reports are not installed on this server")
+    t0, t1 = parse_time(start, "start"), parse_time(end, "end")
+    if not t0 < t1:
+        raise BadRequest("start must be before end")
+    if t1 - t0 > pd.Timedelta(days=MAX_SPAN_DAYS):
+        raise BadRequest(f"the window may span at most {MAX_SPAN_DAYS} days")
+    return ctx.reports.geojson(t0, t1), None
 
 
 def _pooled_hit_rate(per_year: dict, years: range) -> float | None:

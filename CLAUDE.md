@@ -1796,7 +1796,7 @@ match the unmasked baseline; a map whose only positive is in an excluded cell co
   An earlier launch of this run failed instantly (bare `python` hit a broken pyenv shim because the venv was not activated; `tee` hid the exit code); it was relaunched with
   the venv active. Stage C (add NTP/ECCC Canadian labels, compare against this US-only baseline) is a separate, not-yet-planned ticket.
 
-### Forecast API for the Rails app (side track; tickets 1-7 of 11 done)
+### Forecast API for the Rails app (side track; tickets 1-8 of 11 done)
 
 Goal: serve the HRRR U-Net ensemble to the sibling Rails app (`../tornado_prediction_radar`) through a Flask API modeled on `../tornet/api/`.
 The full ticket set (title/description/starter prompt per ticket, plus the decisions behind it) is `docs/forecast_api_tickets.md`; the contract is
@@ -1869,7 +1869,16 @@ The full ticket set (title/description/starter prompt per ticket, plus the decis
   **Two corrections to ticket 6's contract found while building:** the README's "vertex mesh within 5.5 m" was a per-axis figure -- over all 11,398 vertices the 4-decimal rounding moves a corner up to 5.6 m per axis and 7.4 m as a
   distance (now stated); and `age_seconds` cannot be trusted after a 304 because the ETag does not change with time (clients compute age from `init_time`). flask-cors 6.x answers a wildcard policy by echoing the caller's origin.
   Needs the gitignored country mask at startup (a deployment item for ticket 11). Nothing is scheduled yet, so `/status` reports `stale` until `run_forecast_job.py` is run on a timer.
-- **Not done:** tickets 8-11 (replay and SPC reports, Rails pages, deployment). No percentage field exists; the API serves tiers only.
+- **Ticket 8, replay and SPC reports (`GET /replay/<id>`, `GET /replays`, `GET /reports?start=&end=`; `replay_cases.py`, `spc_reports.py`, `forecast_job.run_replays`, `scripts/09_serving/run_replay.py`).**
+  A replay is the production ensemble run on a past init time, stored in the store's separate `replay` namespace and tiered by the same `tiers.tier_forecast` path as live. **The API only serves stored replays; it never computes
+  one** (model loading plus ~16 HRRR pulls would not belong in a request handler -- a departure from the ticket text, which proposed compute-on-request). `run_replay.py --all-cases` computed six (Mayfield 2021-12-10 21/22/23Z;
+  2024-04-26 18/20/22Z), ~32 s each. Replay payloads carry `mode: "replay"`, `retrospective: true`, `trained_on_years` and a note that the date is inside the training years, and null `age_seconds`/`stale`.
+  `/reports` returns SPC reports for a half-open window (max 31 days) as GeoJSON: a `touchdown` Point plus a `track` LineString (SPC's straight touchdown-to-lift-off line; zero-length tracks, 7.9% of reports, are points only; unknown EF, 10%,
+  is null). If the reports CSV is missing the API still starts and `/reports` is 503 without `Retry-After`. `/replays` lists stored replays and curated cases with availability (added for the Rails case picker).
+  **Real-server check (all in-sample dates, so plumbing only, not skill):** the six replays serve in ~13 ms at ~200 KB; unlike the quiet live night they have 180-328 High and 385-511 Elevated cells each; of the SPC touchdowns inside each
+  bin window, 83-100% lie within one cell of an Elevated-or-High cell (e.g. 5 of 6 and 11 of 12 in the two earliest bins, all of the rest). That figure is **not** evidence of skill: the model trained on these dates (and on these reports as labels), and the 60% Elevated-or-High capture measured out of sample
+  is the honest number. One bug found by a real-data test while building: `ReportsCatalog` failed on timezone-aware timestamps (fixed; the API always normalized before calling it).
+- **Not done:** tickets 9-11 (Rails forecast page, Rails verification overlay, deployment). No percentage field exists; the API serves tiers only.
 
 ## Current status
 

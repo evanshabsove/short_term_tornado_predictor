@@ -16,8 +16,8 @@ NOW = pd.Timestamp("2026-10-19 02:30")
 
 
 @pytest.fixture
-def app(store_root, country, tier_config):
-    return create_app(store_root, country=country, tier_config=tier_config, now=lambda: NOW)
+def app(store_root, country, tier_config, reports_csv):
+    return create_app(store_root, country=country, tier_config=tier_config, now=lambda: NOW, reports_path=reports_csv)
 
 
 @pytest.fixture
@@ -268,3 +268,93 @@ def test_creating_the_app_starts_no_background_threads(store_root, country, tier
     before = threading.active_count()
     create_app(store_root, country=country, tier_config=tier_config)
     assert threading.active_count() == before
+
+
+# --- replays and reports (ticket 8) ---
+
+
+def test_replay_route(client, replay_store, make_forecast):
+    replay_store.put(make_forecast("2021-12-10 21:00"))
+    r = client.get("/replay/2021-12-10T21Z")
+    body = r.get_json()
+    assert r.status_code == 200 and body["mode"] == "replay" and body["retrospective"] is True
+    assert body["trained_on_years"] == {"first": 2014, "last": 2025} and body["age_seconds"] is None and body["stale"] is None
+    assert list(body)[:3] == ["schema_version", "id", "mode"]
+    assert r.headers["Cache-Control"] == "public, max-age=300"
+    assert r.headers["ETag"] == '"2021-12-10T21Z-3c02381f1611-ts-e2c497b6-replay"'
+    assert client.get("/replay/2021-12-10T21Z", headers={"If-None-Match": r.headers["ETag"]}).status_code == 304
+
+
+def test_replay_errors(client, replay_store, make_forecast):
+    replay_store.put(make_forecast("2021-12-10 21:00"))
+    r = client.get("/replay/2021-12-10T22Z")
+    assert r.status_code == 404 and "run_replay.py" in r.get_json()["error"]
+    for bad in ("latest", "2021-12-10", "nope"):
+        r = client.get(f"/replay/{bad}")
+        assert r.status_code == 400 and list(r.get_json()) == ["error"]
+
+
+def test_replays_and_forecasts_are_separate_worlds(client, store, replay_store, make_forecast):
+    store.put(make_forecast("2026-10-19 01:00"))
+    replay_store.put(make_forecast("2021-12-10 21:00"))
+    assert client.get("/forecast/2021-12-10T21Z").status_code == 404
+    assert client.get("/replay/2026-10-19T01Z").status_code == 404
+    assert [f["id"] for f in client.get("/forecasts").get_json()["forecasts"]] == ["2026-10-19T01Z"]
+    assert [f["id"] for f in client.get("/replays").get_json()["replays"]] == ["2021-12-10T21Z"]
+    assert client.get("/status").get_json()["latest_init_time"] == "2026-10-19T01:00:00Z"  # a replay never counts as the latest forecast
+
+
+def test_replays_route(client, replay_store, make_forecast):
+    replay_store.put(make_forecast("2021-12-10 21:00"))
+    r = client.get("/replays")
+    body = r.get_json()
+    assert r.status_code == 200 and body["count"] == 1 and r.headers["Cache-Control"] == "no-cache"
+    mayfield = next(c for c in body["cases"] if c["key"] == "mayfield-2021")
+    assert [run["available"] for run in mayfield["runs"]] == [True, False, False]
+    assert client.get("/replays?limit=0").status_code == 400
+    assert client.get("/replays?since=junk").status_code == 400
+    assert client.get("/replays?since=2021-12-11T00Z").get_json()["count"] == 0
+
+
+def test_reports_route(client):
+    r = client.get("/reports?start=2024-04-26&end=2024-04-27")
+    body = r.get_json()
+    assert r.status_code == 200 and body["type"] == "FeatureCollection" and body["count"] == 3
+    assert {f["properties"]["kind"] for f in body["features"]} == {"touchdown", "track"}
+    assert r.headers["Cache-Control"] == "public, max-age=3600"
+    assert client.get("/reports?start=2024-04-27&end=2024-04-28").get_json()["count"] == 1
+    assert client.get("/reports?start=2020-01-01&end=2020-01-02").get_json() == {
+        "type": "FeatureCollection", "schema_version": 1, "start": "2020-01-01T00:00:00Z", "end": "2020-01-02T00:00:00Z",
+        "count": 0, "features": []}
+
+
+def test_reports_errors(client):
+    for q in ("", "?start=2024-04-26", "?end=2024-04-27", "?start=2024-04-27&end=2024-04-26", "?start=x&end=y",
+              "?start=2024-01-01&end=2024-06-01"):
+        r = client.get("/reports" + q)
+        assert r.status_code == 400 and list(r.get_json()) == ["error"], q
+
+
+def test_reports_503_without_retry_after_when_the_file_is_missing(store_root, country, tier_config, tmp_path):
+    c = create_app(store_root, country=country, tier_config=tier_config, reports_path=tmp_path / "missing.csv").test_client()
+    r = c.get("/reports?start=2024-04-26&end=2024-04-27")
+    assert r.status_code == 503 and "not installed" in r.get_json()["error"]
+    assert "Retry-After" not in r.headers  # retrying cannot install a file
+    assert c.get("/health").status_code == 200  # the rest of the API is unaffected
+
+
+def test_reports_csv_path_comes_from_the_environment(store_root, country, tier_config, reports_csv, monkeypatch):
+    monkeypatch.setenv("FORECAST_REPORTS_CSV", str(reports_csv))
+    c = create_app(store_root, country=country, tier_config=tier_config).test_client()
+    assert c.get("/reports?start=2024-04-26&end=2024-04-27").get_json()["count"] == 3
+
+
+def test_replay_and_reports_requests_never_modify_the_store(client, filled, replay_store, make_forecast, store_root):
+    replay_store.put(make_forecast("2021-12-10 21:00"))
+    before = _tree(store_root)
+    for path in ["/replay/2021-12-10T21Z", "/replay/2021-12-10T22Z", "/replays", "/reports?start=2024-04-26&end=2024-04-27",
+                 "/reports?start=bad&end=bad"]:
+        client.get(path)
+    for path in ["/replay/2021-12-10T21Z", "/replays", "/reports"]:
+        assert client.post(path).status_code == 405
+    assert _tree(store_root) == before

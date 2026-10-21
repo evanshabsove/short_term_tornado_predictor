@@ -32,8 +32,9 @@ NOW = pd.Timestamp("2026-10-19 02:30")  # 90 min after the 01Z run's init
 
 
 @pytest.fixture
-def ctx(store_root, country, grid, tier_config):
-    return ServingContext.create(store_root, country=country, grid=grid, tier_config=tier_config, now=lambda: NOW)
+def ctx(store_root, country, grid, tier_config, reports_csv):
+    return ServingContext.create(store_root, country=country, grid=grid, tier_config=tier_config, now=lambda: NOW,
+                                 reports_path=reports_csv)
 
 
 # --- argument parsing ---
@@ -319,3 +320,96 @@ def test_tiers_payload_comes_from_the_study_file(ctx, tier_config):
     assert payload["basis"]["sample"].startswith("init 20Z runs") and "4,410" in payload["basis"]["sample"]
     assert 0.05 < payload["basis"]["cutoffs_checked_on"]["high_hit_rate"] < 0.25
     assert "cutoffs" not in payload and "calibrated_percent" not in payload  # cutoffs stay server-side; no percentage exists
+
+
+# --- replays and reports (ticket 8) ---
+
+
+def test_replay_payload_is_marked_retrospective_and_has_no_age(ctx, store, replay_store, make_forecast):
+    replay_store.put(make_forecast("2021-12-10 21:00"))
+    store.put(make_forecast("2026-10-19 01:00"))
+    payload, etag = build_forecast(ctx, "2021-12-10T21Z", replay=True)
+    assert payload["mode"] == "replay" and payload["retrospective"] is True
+    assert payload["trained_on_years"] == {"first": 2014, "last": 2025}
+    assert "2014-2025" in payload["note"] and "not a held-out test" in payload["note"]
+    assert payload["age_seconds"] is None and payload["stale"] is None  # a years-old run has no meaningful age
+    assert etag == "2021-12-10T21Z-3c02381f1611-ts-e2c497b6-replay"
+    live, _ = build_forecast(ctx, "latest")
+    assert set(live) <= set(payload)  # the replay envelope is the live one plus the retrospective fields
+    assert set(payload) - set(live) == {"retrospective", "trained_on_years", "note"}
+    assert [b["bin_index"] for b in payload["bins"]] == [0, 1] and len(payload["bins"][0]["tiers"]) == 11178
+
+
+def test_live_and_replay_namespaces_do_not_leak_into_each_other(ctx, store, replay_store, make_forecast):
+    store.put(make_forecast("2026-10-19 01:00"))
+    replay_store.put(make_forecast("2021-12-10 21:00"))
+    with pytest.raises(NotFound):
+        build_forecast(ctx, "2021-12-10T21Z")  # a replay id is not a live forecast
+    with pytest.raises(NotFound, match="run_replay.py"):
+        build_forecast(ctx, "2026-10-19T01Z", replay=True)  # and the other way round, with a hint on how to make one
+    assert [f["id"] for f in build_forecasts(ctx)[0]["forecasts"]] == ["2026-10-19T01Z"]
+    assert [r["id"] for r in api.build_replays(ctx)[0]["replays"]] == ["2021-12-10T21Z"]
+
+
+def test_replay_has_no_latest_alias(ctx, replay_store, make_forecast):
+    replay_store.put(make_forecast("2021-12-10 21:00"))
+    with pytest.raises(BadRequest):
+        build_forecast(ctx, "latest", replay=True)
+
+
+def test_replay_tiers_use_the_same_path_as_live(ctx, store, replay_store, make_forecast):
+    store.put(make_forecast("2026-10-19 01:00"))
+    replay_store.put(make_forecast("2026-10-19 01:00"))  # identical scores in both namespaces
+    live, _ = build_forecast(ctx, "2026-10-19T01Z")
+    rep, _ = build_forecast(ctx, "2026-10-19T01Z", replay=True)
+    assert [b["tiers"] for b in live["bins"]] == [b["tiers"] for b in rep["bins"]]
+
+
+def test_replay_grid_mismatch_is_a_server_fault(ctx, replay_store, make_forecast):
+    replay_store.put(make_forecast("2021-12-10 21:00", grid_id="ffffffffffff"))
+    with pytest.raises(ServerFault):
+        build_forecast(ctx, "2021-12-10T21Z", replay=True)
+
+
+def test_replays_listing_marks_curated_cases_and_availability(ctx, replay_store, make_forecast):
+    replay_store.put(make_forecast("2021-12-10 21:00"))
+    replay_store.put(make_forecast("2021-12-10 23:00"))
+    replay_store.put(make_forecast("2019-05-20 18:00"))  # not a curated case
+    payload, etag = api.build_replays(ctx)
+    assert etag is None and payload["count"] == 3
+    assert [r["id"] for r in payload["replays"]] == ["2021-12-10T23Z", "2021-12-10T21Z", "2019-05-20T18Z"]
+    assert [r["case"] for r in payload["replays"]] == ["mayfield-2021", "mayfield-2021", None]
+    mayfield = next(c for c in payload["cases"] if c["key"] == "mayfield-2021")
+    assert {r["id"]: r["available"] for r in mayfield["runs"]} == {"2021-12-10T21Z": True, "2021-12-10T22Z": False, "2021-12-10T23Z": True}
+    assert mayfield["runs"][0]["init_time"] == "2021-12-10T21:00:00Z"
+    assert all(not r["available"] for c in payload["cases"] if c["key"] != "mayfield-2021" for r in c["runs"])
+
+
+def test_replays_listing_on_an_empty_store_still_lists_the_cases(ctx):
+    payload, _ = api.build_replays(ctx)
+    assert payload["count"] == 0 and payload["replays"] == [] and len(payload["cases"]) >= 2
+    assert all(not r["available"] for c in payload["cases"] for r in c["runs"])
+
+
+def test_reports_builder_validates_its_window(ctx):
+    for start, end in [(None, "2024-04-27"), ("2024-04-26", None), ("2024-04-27", "2024-04-26"), ("2024-04-26", "2024-04-26"),
+                       ("2024-01-01", "2024-03-01"), ("garbage", "2024-04-27"), ("2024-04-26", "2024-13-01")]:
+        with pytest.raises(BadRequest):
+            api.build_reports(ctx, start, end)
+    assert api.build_reports(ctx, "2024-04-26", "2024-05-27")[0]["count"] == 4  # exactly 31 days is allowed
+    with pytest.raises(BadRequest, match="31 days"):
+        api.build_reports(ctx, "2024-04-26", "2024-05-27T00:00:01Z")
+
+
+def test_reports_builder_accepts_dates_ids_and_iso_times(ctx):
+    for start, end in [("2024-04-26", "2024-04-27"), ("2024-04-26T00Z", "2024-04-27T00Z"),
+                       ("2024-04-26T00:00:00Z", "2024-04-27T00:00:00+00:00"), ("2024-04-25T19:00:00-05:00", "2024-04-26T19:00:00-05:00")]:
+        assert api.build_reports(ctx, start, end)[0]["count"] == 3
+
+
+def test_reports_unavailable_when_the_file_is_missing(store_root, country, grid, tier_config, tmp_path):
+    ctx_no = ServingContext.create(store_root, country=country, grid=grid, tier_config=tier_config, reports_path=tmp_path / "missing.csv")
+    assert ctx_no.reports is None
+    with pytest.raises(api.Unavailable):
+        api.build_reports(ctx_no, "2024-04-26", "2024-04-27")
+    assert ServingContext.create(store_root, country=country, grid=grid, tier_config=tier_config, reports_path=None).reports is None

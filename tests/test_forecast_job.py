@@ -367,3 +367,37 @@ def test_end_to_end_on_real_run(tmp_path):
     assert 0.0 <= got.mean.min() and got.mean.max() <= 1.0
     again = run_once(store, build, status, backfill_hours=3)
     assert again.count(STORED) == 0  # idempotent
+
+
+# --- replays ---
+
+
+def test_run_replays_stores_in_the_replay_namespace_and_skips_existing(tmp_path):
+    from tornado_predictor.forecast_job import run_replays
+
+    replay = ForecastStore(tmp_path, "replay")
+    build = Builder()
+    out = run_replays(replay, build, ["2021-12-10T21Z", ts("2021-12-10 22:00")])
+    assert [o.status for o in out] == [STORED, STORED]
+    assert [m["id"] for m in replay.list()] == ["2021-12-10T22Z", "2021-12-10T21Z"]
+    assert replay.get("2021-12-10 21:00").meta["namespace"] == "replay"
+    assert not ForecastStore(tmp_path, "issued").list()
+    again = run_replays(replay, build, ["2021-12-10T21Z"])
+    assert [o.status for o in again] == [SKIPPED_EXISTING] and len(build.calls) == 2  # nothing recomputed
+
+
+def test_run_replays_records_a_failure_and_continues(tmp_path):
+    from tornado_predictor.forecast_job import run_replays
+
+    replay = ForecastStore(tmp_path, "replay")
+    build = Builder(fail={ts("2021-12-10 21:00"): EOFError("Premature end of file")})
+    out = run_replays(replay, build, ["2021-12-10T21Z", "2021-12-10T22Z"])
+    assert [o.status for o in out] == [FAILED, STORED]
+    assert "EOFError" in out[0].message and not replay.has("2021-12-10 21:00")
+
+
+def test_run_replays_refuses_the_issued_namespace(tmp_path):
+    from tornado_predictor.forecast_job import run_replays
+
+    with pytest.raises(ValueError, match="replay"):
+        run_replays(ForecastStore(tmp_path, "issued"), Builder(), ["2021-12-10T21Z"])

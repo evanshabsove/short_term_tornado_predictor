@@ -58,6 +58,7 @@ from tornado_predictor.forecast_store import (
     _iso_z,
     _naive_utc,
     format_forecast_id,
+    parse_forecast_id,
 )
 from tornado_predictor.grid import HrrrCoarseGrid
 from tornado_predictor.live_features import PUBLISH_LATENCY_MINUTES, extract_live_inputs, run_is_complete
@@ -279,6 +280,38 @@ def run_once(
         # the caller injected a clock, in which case that clock is the only time there is.
         status.record_job(result, now if clock_injected else pd.Timestamp.now(tz="UTC"))
     return result
+
+
+def run_replays(
+    store: ForecastStore,
+    build_forecast: Callable[[pd.Timestamp], Forecast],
+    init_times,
+) -> list[RunOutcome]:
+    """Computes and stores a replay for each historical init time, skipping any
+    already stored (a replay is never overwritten) and recording, not raising, a
+    per-run failure. `store` must be the "replay" namespace so a replay can never
+    land among issued forecasts. No completeness check or status file: historical
+    HRRR runs are all published, and replays are not part of the live pipeline."""
+    if store.namespace != "replay":
+        raise ValueError(f"replays must go to the 'replay' namespace, got {store.namespace!r}")
+    outcomes = []
+    for raw in init_times:
+        init = parse_forecast_id(raw) if isinstance(raw, str) and raw.endswith("Z") else _naive_utc(raw)
+        if store.has(init):
+            outcomes.append(RunOutcome(init, SKIPPED_EXISTING))
+            continue
+        try:
+            store.put(build_forecast(init))
+        except FileExistsError:
+            outcomes.append(RunOutcome(init, SKIPPED_EXISTING))
+        except Exception as e:  # noqa: BLE001 - one bad run must not stop the rest
+            message = f"{type(e).__name__}: {e}"
+            log.error("%s: replay failed: %s", init, message)
+            outcomes.append(RunOutcome(init, FAILED, message))
+        else:
+            log.info("%s: replay stored", init)
+            outcomes.append(RunOutcome(init, STORED))
+    return outcomes
 
 
 def run_locked(store: ForecastStore, *args, **kwargs) -> JobResult:

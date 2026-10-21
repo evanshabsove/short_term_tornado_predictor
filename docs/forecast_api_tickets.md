@@ -238,6 +238,9 @@ store, with the same error handling, CORS and `/health` conventions as tornet.
 
 ### 8. Historical replay and SPC reports endpoint
 
+**Status: done 2026-10-20** (`GET /replay/<id>`, `GET /replays`, `GET /reports`; `replay_cases.py`, `spc_reports.py`, `forecast_job.run_replays`, `scripts/09_serving/run_replay.py`; 6 real replays stored under `data/live/replay/`).
+One deliberate departure from the ticket text: the API does **not** compute a replay on request (that would load 5 models and pull ~16 HRRR files, 30+ s, inside a request handler). `run_replay.py` computes and stores them offline; the route serves what is stored and a missing id is a 404 that says how to make it. `/replays` was added so the Rails case picker can discover cases.
+
 **Description:** The equivalent of tornet's `/predict/<storm_id>`: let the UI pull the forecast
 for a past case plus the SPC reports that verified it. It makes the Rails page demonstrable in
 October with no live severe weather.

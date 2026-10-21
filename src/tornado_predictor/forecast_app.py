@@ -10,6 +10,8 @@ Run: `python api/app.py` (serves on :5060, override with PORT). Environment:
   FORECAST_STORE_ROOT           directory holding issued/ and status.json (default data/live)
   FORECAST_STALE_AFTER_SECONDS  a forecast whose run is older than this is flagged stale (default 10800)
   FORECAST_CORS_ORIGINS         "*" (default) or a comma-separated list of allowed origins
+  FORECAST_REPORTS_CSV          SPC reports table for GET /reports (default data/processed/spc_tornado_reports_2014_2025.csv;
+                                if absent the API still starts and /reports answers 503)
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from werkzeug.exceptions import HTTPException
 
 from tornado_predictor import forecast_api as api
 from tornado_predictor.forecast_store import DEFAULT_STORE_ROOT
+from tornado_predictor.spc_reports import DEFAULT_REPORTS_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,7 @@ logger = logging.getLogger(__name__)
 CACHE_GRID = "public, max-age=86400"
 CACHE_FORECAST_BY_ID = "public, max-age=300"
 CACHE_TIERS = "public, max-age=300"
+CACHE_REPORTS = "public, max-age=3600"  # historical reports do not change within the hour
 NO_CACHE = "no-cache"
 
 
@@ -49,6 +53,7 @@ def create_app(
     now: Callable[[], pd.Timestamp] = api.utc_now,
     stale_after_seconds: float | None = None,
     cors_origins: str | None = None,
+    reports_path: Path | str | None = None,
 ) -> Flask:
     """Application factory. Everything has an environment/default fallback so
     `create_app()` is the production configuration; tests pass explicit values
@@ -59,7 +64,8 @@ def create_app(
         stale_after_seconds = float(os.environ.get("FORECAST_STALE_AFTER_SECONDS", api.DEFAULT_STALE_AFTER_SECONDS))
 
     ctx = api.ServingContext.create(
-        store_root, country=country, tier_config=tier_config, stale_after_seconds=stale_after_seconds, now=now
+        store_root, country=country, tier_config=tier_config, stale_after_seconds=stale_after_seconds, now=now,
+        reports_path=reports_path if reports_path is not None else os.environ.get("FORECAST_REPORTS_CSV", DEFAULT_REPORTS_PATH),
     )
     api.build_grid(ctx)  # the static geometry is built once, here, not on the first request
 
@@ -84,8 +90,9 @@ def create_app(
         else:
             response = jsonify({"error": e.message})
         response.status_code = e.status
-        if e.status == 503:
-            response.headers["Retry-After"] = str(api.RETRY_AFTER_SECONDS)
+        retry_after = getattr(e, "retry_after", None)
+        if retry_after is not None:
+            response.headers["Retry-After"] = str(retry_after)
         return response
 
     @app.errorhandler(HTTPException)
@@ -126,6 +133,23 @@ def create_app(
     def forecast(forecast_id: str):
         payload, etag = api.build_forecast(ctx, forecast_id)
         return respond(payload, etag, NO_CACHE if forecast_id == "latest" else CACHE_FORECAST_BY_ID)
+
+    @app.route("/replay/<forecast_id>")
+    def replay(forecast_id: str):
+        payload, etag = api.build_forecast(ctx, forecast_id, replay=True)
+        return respond(payload, etag, CACHE_FORECAST_BY_ID)
+
+    @app.route("/replays")
+    def replays():
+        limit = api.parse_limit(request.args.get("limit"))
+        since = api.parse_since(request.args["since"]) if "since" in request.args else None
+        payload, _ = api.build_replays(ctx, limit, since)
+        return respond(payload, None, NO_CACHE)
+
+    @app.route("/reports")
+    def reports():
+        payload, _ = api.build_reports(ctx, request.args.get("start"), request.args.get("end"))
+        return respond(payload, None, CACHE_REPORTS)
 
     @app.route("/tiers")
     def tiers():
