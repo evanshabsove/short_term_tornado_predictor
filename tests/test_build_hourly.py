@@ -7,6 +7,9 @@ from tornado_predictor.build_hourly import (
     BASE_FEATURE_NAMES,
     EXTRA_FEATURE_NAMES,
     FEATURE_SETS,
+    STANDARDIZED_FEATURE_NAMES,
+    TENDENCY_FEATURE_NAMES,
+    pressure_tendency,
     HOURLY_FXX,
     STAGED_FXX_TO_SAMPLE,
     aggregate_bin,
@@ -272,7 +275,7 @@ def test_derive_wholebin_run_appends_extra_channels_after_the_base_14(tmp_path):
     )
 
     with xr.open_dataset(run_staging_path(out_dir, INIT)) as out:
-        assert list(out.data_vars) == BASE_FEATURE_NAMES + EXTRA_FEATURE_NAMES + ["label"]
+        assert list(out.data_vars) == BASE_FEATURE_NAMES + EXTRA_FEATURE_NAMES + TENDENCY_FEATURE_NAMES + ["label"]
         assert float(out["pres_sfc_mean"].isel(sample=1).mean()) == pytest.approx(105.5)  # mean of 104..107
         assert float(out["pres_sfc_max"].isel(sample=0).mean()) == pytest.approx(103.0)
 
@@ -330,3 +333,27 @@ def test_pull_extra_snapshot_rejects_too_many_lcl_nans_and_fully_undefined_cells
     bh = _patch_pulls(monkeypatch, lcl_all_nan_cell=True)
     with pytest.raises(ValueError, match="no valid native pixel"):
         bh.pull_extra_snapshot(INIT, 0, GRID)
+
+
+def test_pressure_tendency_is_last_hour_minus_first_of_each_bin_and_is_in_the_derived_file(tmp_path):
+    ds = build_hourly_run(INIT, GRID, None, pull=_fake_extra_pull, feature_names=EXTRA_FEATURE_NAMES)  # pressure = 100 + fxx
+    assert float(pressure_tendency(ds, 0).mean()) == 3.0  # fxx 3 - fxx 0
+    assert float(pressure_tendency(ds, 1).mean()) == 3.0  # fxx 7 - fxx 4
+
+    spiked = ds.copy(deep=True)
+    spiked["pres_sfc_mean"].loc[dict(fxx=3)] = 90.0  # a pressure FALL inside bin 0
+    assert float(pressure_tendency(spiked, 0).mean()) == pytest.approx(90.0 - 100.0)
+    assert float(pressure_tendency(spiked, 1).mean()) == 3.0  # bin 1 untouched
+
+
+def test_derived_file_carries_the_tendency_channel_and_standardized_set_is_extras_plus_tendency(tmp_path):
+    hourly_dir, extra_dir, out_dir = tmp_path / "h", tmp_path / "e", tmp_path / "w"
+    hourly_dir.mkdir(); extra_dir.mkdir()
+    build_hourly_run(INIT, GRID, None, pull=_fake_pull_factory()).to_netcdf(hourly_run_path(hourly_dir, INIT))
+    build_hourly_run(INIT, GRID, None, pull=_fake_extra_pull, feature_names=EXTRA_FEATURE_NAMES).to_netcdf(hourly_run_path(extra_dir, INIT))
+    derive_wholebin_run(hourly_run_path(hourly_dir, INIT), _labels([]), GRID, run_staging_path(out_dir, INIT),
+                        extra_hourly_path=hourly_run_path(extra_dir, INIT))
+    with xr.open_dataset(run_staging_path(out_dir, INIT)) as out:
+        assert float(out["pres_sfc_tend"].isel(sample=0).mean()) == 3.0
+        assert out["pres_sfc_tend"].dims == ("sample", "row", "col")
+    assert STANDARDIZED_FEATURE_NAMES == EXTRA_FEATURE_NAMES + TENDENCY_FEATURE_NAMES == EXTRA_FEATURE_NAMES + ["pres_sfc_tend"]

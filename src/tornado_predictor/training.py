@@ -101,6 +101,31 @@ class DenseGridDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
+def standardize_channels(dataset: "DenseGridDataset", names: list[str], stats: dict | None = None, min_std: float = 1e-6) -> dict:
+    """Z-scores the named channels of dataset.X in place and returns the statistics used.
+
+    stats=None computes mean/std per channel over every sample and cell of `dataset`
+    (pass the TRAINING set); a returned stats dict is then passed back for the test
+    set, so no test information reaches the scaling. Channels not named are left
+    raw -- the base 14 features have never been normalized in this project and
+    experiment B deliberately keeps it that way. std is floored at min_std so a
+    constant channel cannot divide by zero.
+
+    The dict ({"names", "mean", "std"}, plain lists) is what checkpoints store as
+    `input_scaling`; inference.apply_input_scaling replays it."""
+    if stats is None:
+        mean, std = [], []
+        for name in names:
+            channel = dataset.X[:, dataset.feature_names.index(name)]
+            mean.append(float(channel.mean(dtype=np.float64)))
+            std.append(max(float(channel.std(dtype=np.float64)), min_std))
+        stats = {"names": list(names), "mean": mean, "std": std}
+    for name, m, s in zip(stats["names"], stats["mean"], stats["std"]):
+        i = dataset.feature_names.index(name)
+        dataset.X[:, i] = (dataset.X[:, i] - m) / s
+    return stats
+
+
 def masked_is_active(dataset: "DenseGridDataset", cell_mask: np.ndarray | None) -> np.ndarray:
     """Per-sample 'active' flags counting only positives inside cell_mask (a map
     whose only positive lies in an excluded cell is quiet for sampling purposes).

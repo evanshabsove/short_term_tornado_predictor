@@ -66,6 +66,13 @@ EXTRA_FEATURE_NAMES: list[str] = [f"{n}_{s}" for n in EXTRA_PHYSICAL_NAMES for s
 
 FEATURE_SETS: dict[str, list[str]] = {"base": BASE_FEATURE_NAMES, "extra": EXTRA_FEATURE_NAMES}
 
+# Derived from the hourly extras store (no extra download): surface-pressure tendency within a bin, the cell-mean
+# pressure at the bin's last hour minus its first (Pa over 3 h). Appended after the extra channels.
+TENDENCY_FEATURE_NAMES: list[str] = ["pres_sfc_tend"]
+
+# Channels that experiment B z-scores (training-split statistics); the base 14 stay raw like every earlier model.
+STANDARDIZED_FEATURE_NAMES: list[str] = EXTRA_FEATURE_NAMES + TENDENCY_FEATURE_NAMES
+
 HOURLY_FXX: tuple[int, ...] = tuple(range(MAX_LEAD_HOURS))
 
 # fxx already present in a v2 staged file -> its sample index there.
@@ -295,6 +302,13 @@ def aggregate_bin(hourly: xr.Dataset, bin_index: int, feature_names: list[str] =
     return xr.Dataset(out)
 
 
+def pressure_tendency(extra_hourly: xr.Dataset, bin_index: int) -> xr.DataArray:
+    """(row, col) change in cell-mean surface pressure across a bin: last hour minus first."""
+    hours = list(fxx_values_for_bin(bin_index))
+    p = extra_hourly["pres_sfc_mean"]
+    return xr.DataArray(p.sel(fxx=hours[-1]).values - p.sel(fxx=hours[0]).values, dims=("row", "col"))
+
+
 def derive_wholebin_run(
     hourly_path: Path,
     labels_df: pd.DataFrame,
@@ -304,8 +318,8 @@ def derive_wholebin_run(
 ) -> None:
     """Writes one run's whole-bin staged file (v2 staging format) from its
     hourly file and the labels table. With extra_hourly_path, the extra
-    candidate channels are appended after the 14 base channels (so a base-only
-    experiment is just `--drop-columns` of them)."""
+    candidate channels and the pressure-tendency channel are appended after the
+    14 base channels (so a base-only experiment is just `--drop-columns` of them)."""
     with xr.open_dataset(hourly_path) as hourly:
         hourly = hourly.load()
     extra = None
@@ -318,6 +332,7 @@ def derive_wholebin_run(
         ds = aggregate_bin(hourly, bin_index)
         if extra is not None:
             ds = ds.assign(**aggregate_bin(extra, bin_index, EXTRA_FEATURE_NAMES).data_vars)
+            ds["pres_sfc_tend"] = (("row", "col"), pressure_tendency(extra, bin_index).values.astype("float32"))
         label = label_grid_for_sample(labels_df, init_time, bin_index, grid)
         samples.append(ds.assign(label=(("row", "col"), label)))
     combined = xr.concat(samples, dim="sample").assign_coords(

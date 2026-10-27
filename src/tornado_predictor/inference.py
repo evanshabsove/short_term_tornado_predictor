@@ -59,6 +59,18 @@ def assert_feature_order_matches(dataset_feature_names: list[str], checkpoint: d
         )
 
 
+def apply_input_scaling(dataset, checkpoint: dict) -> None:
+    """Replays the z-scoring a checkpoint was trained with (its `input_scaling`
+    entry) on `dataset`, in place. A no-op for every checkpoint saved without
+    one, which is all checkpoints made before experiment B, so they score
+    exactly as before. Call after assert_feature_order_matches."""
+    scaling = checkpoint.get("input_scaling")
+    if scaling:
+        from tornado_predictor.training import standardize_channels
+
+        standardize_channels(dataset, scaling["names"], stats=scaling)
+
+
 def predict_proba(model: nn.Module, X: np.ndarray) -> np.ndarray:
     """X: (channels, row, col) -> probability map (row, col), via
     sigmoid on the model's raw logits (see model.py)."""

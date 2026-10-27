@@ -33,7 +33,7 @@ from sklearn.metrics import (
     roc_curve,
 )
 
-from tornado_predictor.inference import assert_feature_order_matches, load_checkpoint, predict_proba
+from tornado_predictor.inference import apply_input_scaling, assert_feature_order_matches, load_checkpoint, predict_proba
 from tornado_predictor.training import DenseGridDataset
 
 
@@ -160,6 +160,7 @@ def evaluate_checkpoint(checkpoint_path: str, dataset_path: str, include_curves:
     model, checkpoint = load_checkpoint(checkpoint_path)
     dataset = DenseGridDataset(dataset_path)
     assert_feature_order_matches(dataset.feature_names, checkpoint)
+    apply_input_scaling(dataset, checkpoint)  # no-op unless the checkpoint was trained with scaled channels
 
     metrics = evaluate_model(model, dataset, include_curves=include_curves, cell_mask=cell_mask)
     metrics["final_train_loss"] = checkpoint["loss_history"][-1]

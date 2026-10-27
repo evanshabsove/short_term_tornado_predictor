@@ -46,7 +46,8 @@ from tornado_predictor.cell_mask import resolve_cell_mask
 from tornado_predictor.evaluate import evaluate_model
 from tornado_predictor.split import available_years, split_run_bins_year_holdout
 from tornado_predictor.time_bins import N_BINS
-from tornado_predictor.training import DenseGridDataset, train_model
+from tornado_predictor.build_hourly import STANDARDIZED_FEATURE_NAMES
+from tornado_predictor.training import DenseGridDataset, standardize_channels, train_model
 from tornado_predictor.unet import TornadoUNet
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -85,7 +86,7 @@ def summarize(results: list[dict]) -> dict:
     }
 
 
-def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, scratch_dir: Path, out_dir: Path, epochs: int, drop_columns: list[str] | None = None, seed: int = SEED, ema_decays: tuple[float, ...] = (), cell_mask_name: str = "none") -> dict:
+def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, scratch_dir: Path, out_dir: Path, epochs: int, drop_columns: list[str] | None = None, seed: int = SEED, ema_decays: tuple[float, ...] = (), cell_mask_name: str = "none", standardize_names: list[str] | None = None) -> dict:
     cell_mask = resolve_cell_mask(cell_mask_name)  # None for "none": loss and metrics over every cell, as always
     train_runs, test_runs = split_run_bins_year_holdout(run_bins, held_out_year, buffer_hours=BUFFER_HOURS)
 
@@ -109,6 +110,15 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
             test_ds.X = test_ds.X[:, idx]
             test_ds.feature_names = list(train_ds.feature_names)
             print("  (aligned test-set channel order to the training set's)", flush=True)
+        # Experiment B: z-score only the named (new) channels with TRAINING-split statistics, leaving the base 14 raw like every earlier
+        # model. Stored in each checkpoint as `input_scaling`; inference.apply_input_scaling replays it. Off by default (unchanged behavior).
+        input_scaling = None
+        if standardize_names:
+            missing = [n for n in standardize_names if n not in train_ds.feature_names]
+            assert not missing, f"cannot standardize channels absent from the data: {missing}"
+            input_scaling = standardize_channels(train_ds, standardize_names)
+            standardize_channels(test_ds, standardize_names, stats=input_scaling)
+            print(f"  standardized {len(standardize_names)} channels with training-split statistics", flush=True)
         print(f"  train: {len(train_ds)} ({int(train_ds.is_active.sum())} active) | "
               f"test (held-out {held_out_year}): {len(test_ds)} ({int(test_ds.is_active.sum())} active)")
 
@@ -134,6 +144,7 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
                 "training_hyperparameters": train_result["hyperparameters"],
                 "model_hyperparameters": {"in_channels": len(train_ds.feature_names), "base_channels": BASE_CHANNELS},
                 "feature_names": train_ds.feature_names,
+                **({"input_scaling": input_scaling} if input_scaling else {}),
             }, out_dir / f"tornado_unet_heldout_{held_out_year}_ema{decay}.pt")
         elapsed = time.time() - t0
 
@@ -147,6 +158,7 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
             "training_hyperparameters": train_result["hyperparameters"],
             "model_hyperparameters": {"in_channels": len(train_ds.feature_names), "base_channels": BASE_CHANNELS},
             "feature_names": train_ds.feature_names,
+            **({"input_scaling": input_scaling} if input_scaling else {}),
         }, ckpt_path)
 
         return {
@@ -182,6 +194,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=SEED, help="seeds both model init (torch.manual_seed) and train_model's quiet-map sampling/shuffling; use a separate --out-dir/--results per seed")
     parser.add_argument("--drop-columns", nargs="+", default=None, help="variables to drop from each fold's combined data (e.g. the UH columns, which are NaN-filled for runs staged without them)")
     parser.add_argument("--cell-mask", choices=["none", "us_trusted"], default="none", help="us_trusted: exclude Canada/Mexico/other-land cells (no SPC labels there) from the loss and the reported metrics; inputs keep the full grid. Default none = unchanged behavior")
+    parser.add_argument("--standardize-extras", action="store_true", help="z-score the extra-field channels (build_hourly.STANDARDIZED_FEATURE_NAMES) with training-split statistics; the base 14 stay raw. Default off = unchanged behavior")
     parser.add_argument("--years", type=int, nargs="+", default=None, help="restrict to these held-out years (default: every year present in the manifest)")
     args = parser.parse_args()
 
@@ -198,7 +211,7 @@ def main() -> None:
             print(f"\n=== held-out year {year}: already done, skipping ===")
             continue
         print(f"\n=== held-out year {year} ===")
-        fold_result = run_one_fold(year, run_bins, args.staging_dir, args.scratch_dir, args.out_dir, args.epochs, args.drop_columns, args.seed, tuple(args.ema_decays), args.cell_mask)
+        fold_result = run_one_fold(year, run_bins, args.staging_dir, args.scratch_dir, args.out_dir, args.epochs, args.drop_columns, args.seed, tuple(args.ema_decays), args.cell_mask, STANDARDIZED_FEATURE_NAMES if args.standardize_extras else None)
         print(f"  AUC-PR={fold_result['auc_pr']:.4f} AUC-ROC={fold_result['auc_roc']:.4f} "
               f"cohens_d={fold_result['cohens_d']:.2f}  ({fold_result['elapsed_sec']:.0f}s)")
         results.append(fold_result)
