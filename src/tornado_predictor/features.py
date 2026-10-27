@@ -106,6 +106,34 @@ FIELD_UNITS: dict[str, str] = {
     "uh_2_5km": "m2 s-2",
 }
 
+# Candidate fields beyond the base 14, from docs/feature_candidates_research.md.
+# Search strings verified against real .idx inventories there (present on every
+# sampled day 2014-09-02 .. 2025-11-28); live pulls are re-checked by
+# scripts/02_dataset_build/check_extra_fields.py. Kept separate from FIELD_SPECS so
+# extract_features (and every existing dataset/checkpoint) is unchanged.
+EXTRA_FIELD_SPECS: list[tuple[str, str]] = [
+    ("mlcape", "CAPE:180-0 mb above ground"),
+    ("mlcin", "CIN:180-0 mb above ground"),
+    ("mucape", "CAPE:255-0 mb above ground"),
+    ("mucin", "CIN:255-0 mb above ground"),
+    ("lcl_sb", "HGT:level of adiabatic condensation from sfc"),
+    ("shear_u_0_1km", "VUCSH:0-1000 m above ground"),
+    ("shear_v_0_1km", "VVCSH:0-1000 m above ground"),
+    ("refc", "REFC:entire atmosphere"),
+    ("pres_sfc", "PRES:surface"),
+]
+
+EXTRA_FIELD_UNITS: dict[str, str] = {
+    "mlcape": "J kg-1",
+    "mlcin": "J kg-1",
+    "mucape": "J kg-1",
+    "mucin": "J kg-1",
+    "lcl_sb": "m",
+    "shear_0_1km": "m s-1",
+    "refc": "dBZ",
+    "pres_sfc": "Pa",
+}
+
 
 def pull_hrrr_field(init_time, fxx: int, search_string: str, max_attempts: int = 3) -> np.ndarray:
     """One Herbie pull for a single field; returns its raw native-grid
