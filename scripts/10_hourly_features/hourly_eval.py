@@ -53,9 +53,14 @@ def tag(arm):
     return f"hourly_{arm}"
 
 
+# "ema0.9999" is the pre-registered scoring variant. "raw" (the plain final weights) exists only to validate the scoring path against the
+# training script's own in-script AUC-PR (the EMA of a 1-epoch smoke run is still mostly the random init).
+VARIANT = "ema0.9999"
+
+
 def score_missing(arm, year, seeds, run_bins):
-    cache = lambda s: dsm.CACHE / f"{tag(arm)}_ema0.9999_s{s}_{year}.npy"
-    ckpt = lambda s: STUDY[arm] / f"seed{s}" / f"tornado_unet_heldout_{year}_ema0.9999.pt"
+    cache = lambda s: dsm.CACHE / f"{tag(arm)}_{VARIANT}_s{s}_{year}.npy"
+    ckpt = lambda s: STUDY[arm] / f"seed{s}" / f"tornado_unet_heldout_{year}{'' if VARIANT == 'raw' else '_' + VARIANT}.pt"
     todo = [s for s in seeds if ckpt(s).exists() and not cache(s).exists()]
     if not todo:
         return
@@ -114,8 +119,11 @@ def main():
     ap.add_argument("--years", type=int, nargs="+", default=list(bs.SEED_FOLDS))
     ap.add_argument("--seeds", type=int, nargs="+", default=[10, 11, 12])
     ap.add_argument("--boots", type=int, default=1000)
+    ap.add_argument("--variant", choices=["ema0.9999", "raw"], default="ema0.9999", help="raw is for validating the scoring path only; the pre-registered analysis uses ema0.9999")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
+    global VARIANT
+    VARIANT = args.variant
     out_path = args.out or STUDY[args.arm] / ("hourly_eval.json" if len(args.seeds) == 3 else f"hourly_eval_{len(args.seeds)}seeds.json")
 
     manifest = load_manifest(STAGING[args.arm] / "manifest.json")
@@ -133,7 +141,7 @@ def main():
         D = len(days)
         W = np.stack([np.bincount(rng.integers(0, D, D), minlength=D) for _ in range(args.boots)]).astype(np.float64)
 
-        load = lambda t, s: np.load(dsm.CACHE / f"{t}_ema0.9999_s{s}_{year}.npy").astype(np.float32)
+        load = lambda t, s: np.load(dsm.CACHE / f"{t}_{VARIANT}_s{s}_{year}.npy").astype(np.float32)
         ARM = {s: load(tag(args.arm), s) for s in args.seeds}
         BASE = {s: load("emastudy", s) for s in BASE_SEEDS}
 
@@ -149,7 +157,7 @@ def main():
         tv = np.array([ap_boot(np.mean([BASE[s] for s in c], axis=0))[0] for c in combinations(BASE_SEEDS, k)])
         d = arm_boot - m_boot
         row = {
-            "year": year, "n_days": int(D), "arm_seeds": list(args.seeds),
+            "year": int(year), "n_days": int(D), "arm_seeds": list(args.seeds),
             "arm_single_aps": {str(s): ap_boot(ARM[s])[0] for s in args.seeds},
             "base_single_aps": {str(s): ap_boot(BASE[s])[0] for s in BASE_SEEDS},
             "vs_baseline": {
@@ -165,7 +173,7 @@ def main():
             "base_matched_ens_metrics": metrics(y, base_matched, quiet_run, y_dil1),
         }
         if args.arm == "extras":
-            a_seeds = [s for s in args.seeds if (dsm.CACHE / f"{tag('wholebin')}_ema0.9999_s{s}_{year}.npy").exists()]
+            a_seeds = [s for s in args.seeds if (dsm.CACHE / f"{tag('wholebin')}_{VARIANT}_s{s}_{year}.npy").exists()]
             assert a_seeds == list(args.seeds), f"score experiment A for seeds {args.seeds} first (have {a_seeds})"
             a_ens = np.mean([load(tag("wholebin"), s) for s in args.seeds], axis=0)
             a_ap, a_boot = ap_boot(a_ens)
@@ -183,11 +191,11 @@ def main():
     summary = {"vs_baseline": verdict([f["vs_baseline"]["E_vs_mean"] for f in folds])}
     # Pre-registered strength qualifiers (they never change the verdict category, only how strongly it may be worded):
     # folds where the arm ensemble beats the baseline ensembles' 90th percentile / folds whose paired day-bootstrap interval excludes zero.
-    summary["vs_baseline"]["folds_above_baseline_p90"] = sum(f["vs_baseline"]["arm_ens_ap"] > f["vs_baseline"]["base_ensembles_p90"] for f in folds)
-    summary["vs_baseline"]["folds_paired_ci_excludes_zero"] = sum(np.prod(f["vs_baseline"]["paired_diff_vs_matched_ci95"]) > 0 for f in folds)
+    summary["vs_baseline"]["folds_above_baseline_p90"] = int(sum(f["vs_baseline"]["arm_ens_ap"] > f["vs_baseline"]["base_ensembles_p90"] for f in folds))
+    summary["vs_baseline"]["folds_paired_ci_excludes_zero"] = int(sum(np.prod(f["vs_baseline"]["paired_diff_vs_matched_ci95"]) > 0 for f in folds))
     if args.arm == "extras":
         summary["vs_wholebin"] = verdict([f["vs_wholebin"]["E"] for f in folds])
-        summary["vs_wholebin"]["folds_paired_ci_excludes_zero"] = sum(np.prod(f["vs_wholebin"]["paired_diff_ci95"]) > 0 for f in folds)
+        summary["vs_wholebin"]["folds_paired_ci_excludes_zero"] = int(sum(np.prod(f["vs_wholebin"]["paired_diff_ci95"]) > 0 for f in folds))
     prereg_sha = hashlib.sha256(PREREG.read_bytes()).hexdigest() if PREREG.exists() else None
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({"arm": args.arm, "seeds": list(args.seeds), "preregistration_sha256": prereg_sha, "summary": summary, "folds": folds}, indent=1))
