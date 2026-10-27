@@ -6,7 +6,9 @@
 # Both studies share data/interim/cv_scratch, so run A and B one after the other, never together.
 # Usage (repo root, project venv):  caffeinate -i bash scripts/10_hourly_features/run_wholebin_study.sh
 #   extension seeds (only if the pre-registered rule calls for it):  SEEDS="13 14 15" bash scripts/10_hourly_features/run_wholebin_study.sh
-set -e
+set -eo pipefail   # pipefail: tee must not hide a failing python
+cd "$(dirname "$0")/../.."
+source .venv/bin/activate   # bare `python` hits a broken pyenv shim outside the venv
 OUT=models/hourly_study/wholebin
 for SEED in ${SEEDS:-10 11 12}; do
   mkdir -p $OUT/seed$SEED

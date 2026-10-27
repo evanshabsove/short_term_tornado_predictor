@@ -4,7 +4,9 @@
 # the 17 new channels z-scored with training-split statistics (--standardize-extras; stored in each checkpoint as input_scaling).
 # Same recipe, seeds 10-12, folds 2016/2020/2024, EMA 0.9999. Trained on data/interim/scaled_build_wholebin_extra/. ~8 h. Resumable.
 # Usage (repo root, project venv):  caffeinate -i bash scripts/10_hourly_features/run_extras_study.sh
-set -e
+set -eo pipefail   # pipefail: tee must not hide a failing python
+cd "$(dirname "$0")/../.."
+source .venv/bin/activate   # bare `python` hits a broken pyenv shim outside the venv
 OUT=models/hourly_study/extras
 for SEED in ${SEEDS:-10 11 12}; do
   mkdir -p $OUT/seed$SEED
