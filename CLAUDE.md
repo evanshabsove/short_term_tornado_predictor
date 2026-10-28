@@ -1439,6 +1439,29 @@ notebook before results.
   folds, v4 test years only; baselines were not re-scored under dilation or per
   stratum.
 
+### Hourly features: whole-bin aggregation (A) and extra fields (B) -- closed
+
+Pre-registered (`docs/hourly_features_preregistration.md`), results in `docs/hourly_features_results.md`, numbers in
+`models/hourly_study/{wholebin,extras}/hourly_eval.json`. Code: `src/tornado_predictor/build_hourly.py`, `scripts/02_dataset_build/build_hourly_dataset.py`
+and `build_wholebin_datasets.py`, `scripts/10_hourly_features/`. Hourly HRRR (fxx 0-7, plus 9 extra fields) is staged for 4,916 of 4,919 runs
+(`data/interim/scaled_build_hourly{,_extra}/`; 3 permanent AWS archive gaps in 2015); derived whole-bin staging in `scaled_build_wholebin{,_extra}/`.
+Setup: `TornadoUNet(base_channels=16)`, EMA 0.9999, folds 2016/2020/2024, seeds 10-12, 3-member-ensemble AUC-PR vs. the mean of the 20 baseline
+3-member ensembles; "helps" = pooled E >= +8% and >= 2/3 folds. The 17 new channels in B are z-scored with training-split stats (stored as
+`input_scaling` in checkpoints, applied by `inference.apply_input_scaling`); the base 14 stay raw.
+
+- **A (all 4 hours per bin, same 14 channels, time-mean of `_mean`, time-max of `_max`): helps, confirmed.** Pooled **+22.5%** (+31.0/+19.3/+17.1%),
+  above all 20 baseline ensembles in every fold, paired intervals exclude 0 in 3/3. Ensemble AUC-PR 0.0533/0.0689/0.0844 vs. baseline 0.0407/0.0577/0.0720.
+  The false-alarm rate on quiet bins of active runs at 50% recall fell in every fold (0.323->0.193, 0.259->0.216, 0.258->0.231) and map AUC-ROC rose in
+  every fold: supportive of the timing hypothesis, not proof (the change also alters value ranges, e.g. time-max, and bin 1 moves from fxx 4 to fxx 4-7).
+- **B (A + MLCAPE/MLCIN, MUCAPE/MUCIN, SB LCL, 0-1 km shear, REFC, surface pressure, derived `pres_sfc_tend`): helps weakly versus A.** B vs. A pooled **+9.7%**
+  (+4.9/+20.2/+4.0%), 3/3 folds positive, but the paired interval excludes 0 only in 2020, and two folds are under the ~12% resolvable with 3 seeds:
+  "weak: inside noise" by the pre-registered wording. B vs. baseline +34.2%. B's timing metric does not improve consistently over A.
+  **Nothing here attributes the gain to pressure or its tendency** (B bundles all extras; no ablation was run). Predictions: A timing metric met; A size far
+  above my central guess; B-vs-A prior (60% no effect) narrowly missed; era-dependence prediction not met; training stability met (loss ratios 0.945-1.066).
+- **Not in serving:** the production bundle and live path still use single-snapshot features. Whole-bin features would need fxx 0-7 pulls live and a retrained bundle.
+- **Not done:** drop-one-group ablation of B, 12-fold confirmation of A, standardizing the base 14, deployment-like (20Z) stratum, and the ConvLSTM on the hourly store
+  (the user's next, separate project). Pitfall: study runners must activate `.venv` (bare `python` hits a broken pyenv shim; `tee` hides the exit code).
+
 ### Validation against a documented case
 
 `scripts/01_data_pipeline/validate_documented_case.py` spot-checks the grid/time-bin/

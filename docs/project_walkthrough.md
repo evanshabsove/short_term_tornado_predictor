@@ -117,8 +117,12 @@ field.)
 represented by just its *first* hour's snapshot (fxx 0 for bin 0, fxx 4
 for bin 1), not an aggregate over all 4 hours. Pulling and averaging all
 4 would be 4x the network cost for the whole dataset — deliberately
-deferred, and later diagnostics (section 10) suggest it may be part of why
-the model struggles with *when* during a severe day.
+deferred, then **tested later (experiment A)**: building each channel from
+all 4 hours of its bin (time-mean of the mean channels, time-max of the max
+channels) raised the 3-member ensemble AUC-PR by **+22.5%** pooled over three
+test years, above every baseline ensemble in every fold. The production
+ensemble and the live path still use the old single-snapshot features. Details
+and caveats: `docs/hourly_features_results.md`.
 
 **Updraft helicity (UH) was added, tested thoroughly, and dropped** — the
 full story is in section 11. The 14 base features are what every current
@@ -391,8 +395,9 @@ Things worth knowing:
 - Absolute skill is low: AUC-PR ~0.02-0.05 (about 100-300x the no-skill
   baseline), and ~40% of tornado cells fall in the Low tier.
 - No held-out score for the served ensemble itself.
-- Single representative forecast hour per 4-hour bin; timing within a
-  severe day is the weak spot.
+- The served ensemble and the live feature path still use one forecast hour
+  per 4-hour bin; whole-bin features (+22.5% in experiment A) are not in
+  serving yet (would need fxx 0-7 pulls and a retrained bundle).
 - Most pre-ensemble comparisons (alpha, architecture rungs, v4 vs. old) are
   within seed noise; no architecture has had its own hyperparameter tuning.
 - The temporal label simplification (one timestamp per track) is permanent.
@@ -413,11 +418,17 @@ Things worth knowing:
   read-only Flask API; hourly job written and verified, not yet scheduled.
 - **Next, on the API track**: Rails forecast page (9), verification overlay
   (10), deployment (11).
-- **Open modeling questions** (none started): neighborhood-aware features
-  for the GBT, aggregating all 4 forecast hours per bin (the likeliest fix
-  for the timing weakness), per-architecture hyperparameter tuning and
-  U-Net width/depth sweeps, pressure-tendency features, Canadian labels
-  (NTP) and HRDPS features.
+- **Hourly-features study (closed, `docs/hourly_features_results.md`)**:
+  all 4 forecast hours per bin (A) lifted ensemble AUC-PR **+22.5%** over the
+  baseline (3/3 folds, above every baseline ensemble); 17 extra channels
+  incl. pressure and its tendency (B) added a further **+9.7%** over A, but
+  weakly (one fold, 2020, carries it; the other two are +4-5%, inside seed
+  noise). Pressure cannot be credited separately, B bundles all extras.
+- **Open modeling questions** (none started): a ConvLSTM on the hourly
+  store (next, separate project), a drop-one-group ablation of B, a 12-fold
+  confirmation of A, standardizing the base 14 inputs, neighborhood-aware
+  features for the GBT, per-architecture tuning and U-Net width/depth sweeps,
+  Canadian labels (NTP) and HRDPS features.
 
 ## 16. The meta-lesson, if there's one
 
