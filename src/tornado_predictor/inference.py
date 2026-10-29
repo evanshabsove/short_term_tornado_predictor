@@ -26,10 +26,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from tornado_predictor.convlstm_unet import TornadoConvLSTMUNet
 from tornado_predictor.model import TornadoCNN
 from tornado_predictor.unet import TornadoUNet
 
-MODEL_REGISTRY = {"TornadoCNN": TornadoCNN, "TornadoUNet": TornadoUNet}
+MODEL_REGISTRY = {"TornadoCNN": TornadoCNN, "TornadoUNet": TornadoUNet, "TornadoConvLSTMUNet": TornadoConvLSTMUNet}
 
 
 def load_checkpoint(path: str) -> tuple[nn.Module, dict]:
