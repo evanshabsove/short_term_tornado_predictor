@@ -29,12 +29,12 @@ scope. If the ConvLSTM wins, a 31-channel version is a separate follow-up.
 
 ## 3. Staged plan
 
-**Stage 1, snippet (dev scale).** Fold 2020, seed 10, 10 epochs (loss was flat by ~epoch 5 in earlier runs), a stratified subset of that
-fold's training runs (all active runs kept plus a random share of quiet ones) sized from a measured seconds-per-epoch so a run lands in
-**1-2 hours on CPU**. The snippet is for building, debugging, and the gate; it does **not** produce the headline verdict.
+**Stage 1, snippet.** Fold 2020, seed 10, 10 epochs (loss was flat by ~epoch 5 in earlier runs), on the **full** fold-2020 training set (no
+subset: the T4 benchmark projects ~0.5 h for the ConvLSTM and ~0.16 h for the control, inside the 1-2 hour budget; the `--max-train-runs`
+subset stays available as a fallback). The snippet is for building, debugging, and the gate; it does **not** produce the headline verdict.
 
 A **matched control** is trained on the identical snippet: the existing `TornadoUNet(base_channels=16)` on the whole-bin A data (same runs,
-epochs, seed). The snippet ConvLSTM is judged only against this control, never against A's full-scale numbers.
+epochs, seed; arm A's bin-level quiet downsampling). The snippet ConvLSTM is judged only against this control, never against A's full-scale numbers.
 
 **Gate before expanding.** All three must hold:
 1. trains stably: final val/train loss ratio roughly 0.8-1.2, no NaNs;
