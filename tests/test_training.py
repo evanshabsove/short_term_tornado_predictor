@@ -177,8 +177,9 @@ def test_train_model_returns_expected_structure(tmp_path):
 
     result = train_model(dataset, model, epochs=3, batch_size=2, quiet_keep_fraction=0.5, seed=0)
 
-    assert set(result.keys()) == {"loss_history", "hyperparameters"}
+    assert set(result.keys()) == {"loss_history", "epoch_seconds", "hyperparameters"}
     assert len(result["loss_history"]) == 3
+    assert len(result["epoch_seconds"]) == 3 and all(s > 0 for s in result["epoch_seconds"])
     assert all(np.isfinite(loss) for loss in result["loss_history"])
     assert result["hyperparameters"]["epochs"] == 3
 

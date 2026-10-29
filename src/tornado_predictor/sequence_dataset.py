@@ -107,3 +107,16 @@ class DenseSequenceDataset(Dataset):
 
     def __getitem__(self, idx: int):
         return self.load_inputs(idx), self.y[idx]
+
+    def subset(self, indices) -> "DenseSequenceDataset":
+        """A new dataset over `indices` (positions in this one), sharing the already-read
+        labels -- no files are re-read. Order follows `indices`."""
+        indices = [int(i) for i in indices]
+        new = object.__new__(DenseSequenceDataset)
+        new.hourly_dir, new.label_dir, new.feature_names = self.hourly_dir, self.label_dir, self.feature_names
+        new.runs = [self.runs[i] for i in indices]
+        new.hourly_paths = [self.hourly_paths[i] for i in indices]
+        new.y = self.y[indices]
+        new.is_active_by_bin = self.is_active_by_bin[indices]
+        new.is_active = self.is_active[indices]
+        return new

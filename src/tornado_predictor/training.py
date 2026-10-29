@@ -26,6 +26,8 @@ DenseGridDataset, and QuietMapDownsampler together with a given model
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -232,8 +234,10 @@ def train_model(
     ema_params = {d: [p.detach().clone() for p in model.parameters()] for d in ema_decays}
 
     loss_history = []
+    epoch_seconds = []
     val_loss_history = [] if val_dataset is not None else None
     for _ in range(epochs):
+        epoch_start = time.perf_counter()
         epoch_losses = []
         for X, y in loader:
             logits = model(X).squeeze(1)
@@ -251,9 +255,11 @@ def train_model(
         loss_history.append(float(np.mean(epoch_losses)))
         if val_dataset is not None:
             val_loss_history.append(evaluate(val_dataset, model, criterion, batch_size=batch_size, cell_mask=mask_t))
+        epoch_seconds.append(time.perf_counter() - epoch_start)  # train + per-epoch validation, wall clock
 
     result = {
         "loss_history": loss_history,
+        "epoch_seconds": epoch_seconds,
         "hyperparameters": {
             "epochs": epochs,
             "batch_size": batch_size,
