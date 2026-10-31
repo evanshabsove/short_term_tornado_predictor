@@ -1462,6 +1462,19 @@ Setup: `TornadoUNet(base_channels=16)`, EMA 0.9999, folds 2016/2020/2024, seeds 
 - **Not done:** drop-one-group ablation of B, 12-fold confirmation of A, standardizing the base 14, deployment-like (20Z) stratum, and the ConvLSTM on the hourly store
   (the user's next, separate project). Pitfall: study runners must activate `.venv` (bare `python` hits a broken pyenv shim; `tee` hides the exit code).
 
+### ConvLSTM-U-Net on the hourly store vs. arm A -- negative result, with a diagnosed defect
+
+Pre-registered (`docs/convlstm_preregistration.md`), results in `docs/convlstm_results.md`, numbers in `models/convlstm/full_study/convlstm_eval.json`. Code: `sequence_dataset.py`, `convlstm_unet.py`
+(registered as `TornadoConvLSTMUNet`), `sequence_study.py`, `scripts/11_convlstm/`. Input one run (8 hourly steps x the same 14 raw channels), shared U-Net encoder per hour, ConvLSTM at the 11x18 bottleneck, shared decoder
+run at hour 3 (bin 0) and hour 7 (bin 1), one head per bin; A's recipe, batch 1 run, run-level quiet downsampling (~62% active maps vs. A's 79%). Folds 2016/2020/2024, seeds 10-12, 50 epochs, EMA 0.9999.
+
+- **Verdict by the rule: hurts.** 3-member ensemble AUC-PR vs. A's: 0.0378 / 0.0622 / 0.0673 vs. 0.0533 / 0.0689 / 0.0844; E -29.2 / -9.7 / -20.3%, pooled **-19.7%**, 3/3 folds negative, paired interval excludes 0 in 2.
+- **Mixed secondary picture:** timing metric (false alarms on quiet bins of active runs at 50% recall) fell in all folds and map AUC-ROC rose in all folds, but best-F1, per-bin AUC-PR and dilated AUC-PR fell in all folds.
+- **Post-hoc diagnosis (exploratory):** the ConvLSTM also fits the training data worse (not overfitting); the LSTM gates are saturated in all nine trained models (pre-activation std 3e3-9e5, 85-100% beyond |4|; fine at init),
+  likely from raw unscaled inputs with no normalization or clipping; and the skip connections come from a single hour, unlike A's whole-bin pooled fields. So this tests a defective configuration, not the idea; the verdict is not revised.
+- **Not done:** a repaired arm (normalize before the LSTM, gradient clipping, pooled-information skips) needs its own pre-registration and snippet gate (gate saturation as a check). Pitfall: raw-scale inputs and saturating gates do not mix.
+  The pre-registered number to cite for the ConvLSTM is the -19.7%, with the defect caveat.
+
 ### Validation against a documented case
 
 `scripts/01_data_pipeline/validate_documented_case.py` spot-checks the grid/time-bin/
