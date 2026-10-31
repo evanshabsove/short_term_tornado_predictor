@@ -1471,8 +1471,8 @@ run at hour 3 (bin 0) and hour 7 (bin 1), one head per bin; A's recipe, batch 1 
 - **Verdict by the rule: hurts.** 3-member ensemble AUC-PR vs. A's: 0.0378 / 0.0622 / 0.0673 vs. 0.0533 / 0.0689 / 0.0844; E -29.2 / -9.7 / -20.3%, pooled **-19.7%**, 3/3 folds negative, paired interval excludes 0 in 2.
 - **Mixed secondary picture:** timing metric (false alarms on quiet bins of active runs at 50% recall) fell in all folds and map AUC-ROC rose in all folds, but best-F1, per-bin AUC-PR and dilated AUC-PR fell in all folds.
 - **Post-hoc diagnosis (exploratory):** the ConvLSTM also fits the training data worse (not overfitting); the LSTM gates are saturated in all nine trained models (pre-activation std 3e3-9e5, 85-100% beyond |4|; fine at init),
-  likely from raw unscaled inputs with no normalization or clipping; and the skip connections come from a single hour, unlike A's whole-bin pooled fields. So this tests a defective configuration, not the idea; the verdict is not revised.
-- **Not done:** a repaired arm (normalize before the LSTM, gradient clipping, pooled-information skips) needs its own pre-registration and snippet gate (gate saturation as a check). Pitfall: raw-scale inputs and saturating gates do not mix.
+  appearing within the first epoch (gradient norms stay <= 0.1, so clipping is not the fix; likely raw unscaled inputs with no normalization before the LSTM); and the skip connections come from a single hour, unlike A's whole-bin pooled fields. So this tests a defective configuration, not the idea; the verdict is not revised.
+- **Not done:** a repaired arm (GroupNorm before the LSTM, pooled-information skips; clipping is inert) needs its own pre-registration and snippet gate (gate saturation as a check). Pitfall: raw-scale inputs and saturating gates do not mix.
   The pre-registered number to cite for the ConvLSTM is the -19.7%, with the defect caveat.
 
 ### Validation against a documented case

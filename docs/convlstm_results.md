@@ -39,9 +39,11 @@ Prompted by the user's doubt that a model with strictly more information could b
    same ~25-27% deficit as held-out. Only two models were checked.
 2. **The LSTM gates are saturated in all nine trained models** (`scripts/11_convlstm/diagnose_gates.py`, `models/convlstm/full_study/gate_saturation.json`): gate pre-activations have a
    standard deviation of 2.8e3 to 8.8e5, and 85-100% of them lie beyond |4| where sigmoid/tanh are flat. **An untrained model is fine** (std ~0.5, 0% beyond |4|, with raw or z-scored input), so
-   training drove it there. The likely mechanism (not isolated): inputs are raw (CAPE to ~6,600, helicity to ~1,800), the encoder has no normalization, and early gradients are large (epoch-1 loss was
-   3-4x the later level); the encoder's bottleneck activations grew until the saturating gates stopped carrying usable memory. No gradient clipping or normalization precedes the LSTM. A plain U-Net (A) is
-   immune because ReLU convs have no saturating nonlinearity in the path.
+   training drove it there. The saturation appears within the first epoch (a 2-epoch diagnostic, `scripts/11_convlstm/diagnose_training.py`, `models/convlstm/diagnostics/training_diagnostic.json`:
+gate pre-activation std ~8 by step 25 and 30-50 by epoch 2 on an 800-run subset, vs. ~1 with a GroupNorm before the LSTM). An earlier guess in this document that large early gradients caused it is
+**wrong**: global gradient norms stay <= 0.1, so gradient clipping never engages. The likely mechanism (not isolated): raw-scale inputs (CAPE to ~6,600, helicity to ~1,800), an encoder with no normalization,
+and Adam's step size being roughly independent of gradient magnitude, so the encoder's bottleneck activations grow steadily until the saturating gates stop carrying usable memory. A plain U-Net (A) is
+immune because ReLU convs have no saturating nonlinearity in the path.
 3. **A structural difference unrelated to scaling.** At all three decoder resolutions the skip connections come from the single stop hour (hour 3 for bin 0, hour 7 for bin 1). Information from the other
    hours reaches the decoder only through the 11x18 bottleneck memory, while A receives the whole bin's time-mean/time-max at full resolution. The design docstring's statement that the temporal
    combination is "the only thing that differs from arm A" is therefore too strong; this limit would remain even with healthy gates.
