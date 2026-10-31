@@ -21,6 +21,15 @@ Design, in the order data flows:
    cannot influence bin 0 at all (tested). **Disclosed difference:** bin 1's memory also
    contains hours 0-3, which arm A's bin 1 cannot see.
 
+Two optional repairs (T10, after the first full study found the LSTM gates saturated and the single-hour skips too weak; both default off, which
+reproduces the original model exactly, state-dict keys included):
+
+* `norm_bottleneck`: a GroupNorm on the bottleneck features before the LSTM, so raw-scale encoder activations cannot push the sigmoid/tanh gates into
+  their flat regions. The encoder still sees A's raw inputs.
+* `pooled_skips`: each decoder skip is the mean and max, over the hours of that bin's own window, of the encoder features at that resolution (the learned
+  analogue of arm A's time-mean / time-max), merged back to the skip width by a 1x1 conv shared by both stops. Bin 0 pools hours 0-3, bin 1 hours 4-7;
+  the LSTM state still carries hours 0-3 into bin 1. Causality is unchanged: each window ends at its stop.
+
 ConvLSTM cell: input-to-gate is a 1x1 conv (the encoder has already done the spatial work),
 hidden-to-gate is a 3x3 conv. The forget-gate bias starts at 1 so memory is kept early in
 training; initial hidden and cell state are zero. A 1x1 conv projects the hidden state back
@@ -68,6 +77,8 @@ class TornadoConvLSTMUNet(nn.Module):
         base_channels: int = 16,
         hidden_channels: int = 64,
         stop_steps: tuple[int, ...] | list[int] = DEFAULT_STOP_STEPS,
+        norm_bottleneck: bool = False,
+        pooled_skips: bool = False,
     ):
         super().__init__()
         c1, c2, c3, c4 = base_channels, base_channels * 2, base_channels * 4, base_channels * 8
@@ -81,6 +92,10 @@ class TornadoConvLSTMUNet(nn.Module):
         self.bottleneck = ConvBlock(c3, c4)
         self.pool = nn.MaxPool2d(2)
 
+        self.norm_bottleneck = nn.GroupNorm(8, c4) if norm_bottleneck else None
+        self.pooled_skips = pooled_skips
+        if pooled_skips:
+            self.skip_merge = nn.ModuleList([nn.Conv2d(2 * c, c, kernel_size=1) for c in (c1, c2, c3)])
         self.lstm = ConvLSTMCell(c4, hidden_channels)
         self.hidden_to_bottleneck = nn.Conv2d(hidden_channels, c4, kernel_size=1)
 
@@ -107,6 +122,8 @@ class TornadoConvLSTMUNet(nn.Module):
         bottom = self.bottleneck(self.pool(skip3))
 
         bh, bw = bottom.shape[-2:]
+        if self.norm_bottleneck is not None:
+            bottom = self.norm_bottleneck(bottom)
         bottom_seq = bottom.reshape(b, t, -1, bh, bw)
         state = (bottom.new_zeros(b, self.lstm.hidden_channels, bh, bw), bottom.new_zeros(b, self.lstm.hidden_channels, bh, bw))
         hidden_at_stop = {}
@@ -115,13 +132,19 @@ class TornadoConvLSTMUNet(nn.Module):
             if step in self.stop_steps:
                 hidden_at_stop[step] = state[0]
 
-        def at(skip: torch.Tensor, step: int) -> torch.Tensor:
-            return skip.reshape(b, t, *skip.shape[1:])[:, step]
+        starts = (0, *(s + 1 for s in self.stop_steps[:-1]))  # first hour of each stop's own window
+
+        def at(skip: torch.Tensor, level: int, step: int, start: int) -> torch.Tensor:
+            seq = skip.reshape(b, t, *skip.shape[1:])
+            if not self.pooled_skips:
+                return seq[:, step]
+            window = seq[:, start : step + 1]
+            return self.skip_merge[level](torch.cat([window.mean(dim=1), window.amax(dim=1)], dim=1))
 
         outputs = []
-        for head, step in zip(self.heads, self.stop_steps):
-            d3 = self.up3(self.hidden_to_bottleneck(hidden_at_stop[step]), at(skip3, step))
-            d2 = self.up2(d3, at(skip2, step))
-            d1 = self.up1(d2, at(skip1, step))
+        for head, step, start in zip(self.heads, self.stop_steps, starts):
+            d3 = self.up3(self.hidden_to_bottleneck(hidden_at_stop[step]), at(skip3, 2, step, start))
+            d2 = self.up2(d3, at(skip2, 1, step, start))
+            d1 = self.up1(d2, at(skip1, 0, step, start))
             outputs.append(head(d1))
         return torch.cat(outputs, dim=1)[..., :h, :w]

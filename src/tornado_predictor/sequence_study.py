@@ -100,6 +100,9 @@ def train_and_evaluate(
     gamma: float = 2.0,
     quiet_keep_fraction: float = 0.2,
     lr: float = 1e-3,
+    norm_bottleneck: bool = False,
+    pooled_skips: bool = False,
+    grad_clip_norm: float | None = None,
 ) -> dict:
     """Trains one ConvLSTM-U-Net on `train_ds`, tracking loss on `test_ds` each epoch (the held-out
     year, as every year-holdout study here does), saves raw and EMA checkpoints plus float16
@@ -112,13 +115,15 @@ def train_and_evaluate(
         "base_channels": base_channels,
         "hidden_channels": hidden_channels,
         "stop_steps": [3, 7],
+        "norm_bottleneck": norm_bottleneck,
+        "pooled_skips": pooled_skips,
     }
     t0 = time.time()
     torch.manual_seed(seed)  # weight init; train_model seeds its own sampler
     model = TornadoConvLSTMUNet(**hyper)
     result = train_model(
         train_ds, model, val_dataset=test_ds, epochs=epochs, batch_size=batch_size, lr=lr, alpha=alpha, gamma=gamma,
-        quiet_keep_fraction=quiet_keep_fraction, seed=seed, ema_decays=tuple(ema_decays),
+        quiet_keep_fraction=quiet_keep_fraction, seed=seed, ema_decays=tuple(ema_decays), grad_clip_norm=grad_clip_norm,
     )
     train_seconds = time.time() - t0
 
@@ -149,6 +154,7 @@ def train_and_evaluate(
         "seed": seed,
         "model_class": MODEL_CLASS,
         "model_hyperparameters": hyper,
+        "grad_clip_norm": grad_clip_norm,
         "n_train_runs": len(train_ds),
         "n_train_active_runs": int(train_ds.is_active.sum()),
         "n_test_runs": len(test_ds),

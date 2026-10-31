@@ -151,3 +151,24 @@ def test_cli_end_to_end_on_a_tiny_real_subset(tmp_path):
     runs = json.loads((out / "train_runs.json").read_text())
     assert runs["hash"] == res["train_run_list_hash"] and len(runs["runs"]) == 4
     assert np.load(res["scores"]["raw"]).shape == (876, *SHAPE)
+
+
+def test_grad_clip_norm_limits_the_update_and_is_recorded(staged):
+    def weights_after(clip):
+        torch.manual_seed(0)
+        m = TornadoConvLSTMUNet(14, base_channels=4, hidden_channels=8)
+        before = [p.detach().clone() for p in m.parameters()]
+        r = train_model(staged, m, epochs=1, batch_size=1, seed=0, quiet_keep_fraction=1.0, grad_clip_norm=clip)
+        moved = sum((p.detach() - b).norm() ** 2 for p, b in zip(m.parameters(), before)).sqrt().item()
+        return moved, r["hyperparameters"]
+    free, hp_free = weights_after(None)
+    tiny, hp_tiny = weights_after(1e-9)
+    assert tiny < free and "grad_clip_norm" not in hp_free and hp_tiny["grad_clip_norm"] == 1e-9
+
+
+def test_repair_options_flow_into_the_saved_checkpoint(staged, tmp_path):
+    res = train_and_evaluate(staged.subset([0, 1, 2, 3]), staged.subset([4, 5, 2]), out_dir=tmp_path / "o", held_out_year=2020, seed=3, epochs=1,
+                             base_channels=8, hidden_channels=8, ema_decays=(), norm_bottleneck=True, pooled_skips=True, grad_clip_norm=1.0)
+    assert res["model_hyperparameters"]["norm_bottleneck"] and res["model_hyperparameters"]["pooled_skips"] and res["grad_clip_norm"] == 1.0
+    model, _ = load_checkpoint(res["checkpoints"]["raw"])
+    assert model.norm_bottleneck is not None and model.pooled_skips

@@ -190,6 +190,7 @@ def train_model(
     seed: int = 0,
     ema_decays: tuple[float, ...] = (),
     cell_mask: np.ndarray | None = None,
+    grad_clip_norm: float | None = None,
 ) -> dict:
     """Trains model on dataset with FocalLoss + QuietMapDownsampler
     (re-drawing its quiet-map subset each epoch, since DataLoader calls
@@ -214,6 +215,9 @@ def train_model(
     cells contribute nothing to the training or validation loss, and positives
     there do not make a map "active" for QuietMapDownsampler. Inputs are not
     masked -- the model still sees the whole grid.
+
+    grad_clip_norm (default None = off, behavior and results unchanged): clip the global
+    gradient norm to this value after backward and before each optimizer step.
 
     val_dataset should come from split.split_run_bins -- a leakage-safe
     split, not an arbitrary held-out set -- and is evaluated on in full
@@ -244,6 +248,8 @@ def train_model(
             loss = criterion(logits, y) if mask_t is None else criterion(logits, y, mask_t)
             optimizer.zero_grad()
             loss.backward()
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             optimizer.step()
             if ema_params:
                 with torch.no_grad():
@@ -270,6 +276,8 @@ def train_model(
             "seed": seed,
         },
     }
+    if grad_clip_norm is not None:
+        result["hyperparameters"]["grad_clip_norm"] = grad_clip_norm
     if cell_mask is not None:
         result["hyperparameters"]["cell_mask_kept_cells"] = int(np.asarray(cell_mask).sum())
         result["hyperparameters"]["cell_mask_total_cells"] = int(np.asarray(cell_mask).size)

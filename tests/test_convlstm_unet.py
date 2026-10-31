@@ -136,3 +136,80 @@ def test_existing_unet_checkpoint_still_loads_unchanged():
     with torch.no_grad():
         out = model(torch.zeros(1, 14, GRID.n_rows, GRID.n_cols))
     assert out.shape == (1, 1, GRID.n_rows, GRID.n_cols) and np.isfinite(out.numpy()).all()
+
+
+REPAIRS = [dict(norm_bottleneck=True), dict(pooled_skips=True), dict(norm_bottleneck=True, pooled_skips=True)]
+
+
+def test_default_model_has_no_repair_parameters_so_old_checkpoints_load():
+    keys = set(small().state_dict())
+    assert not any(k.startswith(("norm_bottleneck", "skip_merge")) for k in keys)
+    assert any(k.startswith("skip_merge") for k in small(pooled_skips=True).state_dict())
+    assert any(k.startswith("norm_bottleneck") for k in small(norm_bottleneck=True).state_dict())
+    small().load_state_dict(small().state_dict())  # strict load of the default layout
+
+
+@pytest.mark.parametrize("kw", REPAIRS)
+def test_repaired_variants_have_the_same_output_shape_and_every_parameter_gets_gradient(kw):
+    torch.manual_seed(0)
+    model = TornadoConvLSTMUNet(in_channels=3, base_channels=8, hidden_channels=8, **kw)  # base 8: GroupNorm(8, 8 * 8) needs 64 channels
+    x = torch.randn(2, 8, 3, 10, 12)
+    out = model(x)
+    assert out.shape == (2, 2, 10, 12) and torch.isfinite(out).all()
+    FocalLoss()(out, (torch.rand(2, 2, 10, 12) > 0.5).float()).backward()
+    for name, p in model.named_parameters():
+        assert p.grad is not None and torch.isfinite(p.grad).all() and (p.grad != 0).any(), name
+
+
+@pytest.mark.parametrize("kw", REPAIRS)
+def test_repaired_variants_keep_the_causality_contract(kw):
+    torch.manual_seed(0)
+    model = TornadoConvLSTMUNet(in_channels=3, base_channels=8, hidden_channels=8, **kw).eval()
+    x = torch.randn(1, 8, 3, 10, 12)
+
+    def sensitivity(bin_index):
+        xg = x.clone().requires_grad_(True)
+        model(xg)[:, bin_index].sum().backward()
+        return xg.grad.abs().sum(dim=(0, 2, 3, 4))
+
+    s0, s1 = sensitivity(0), sensitivity(1)
+    assert torch.all(s0[:4] > 0) and torch.all(s0[4:] == 0)  # bin 0: exactly hours 0-3
+    assert torch.all(s1 > 0)  # bin 1: hours 4-7 plus the memory of hours 0-3
+
+
+def test_bin_1_pooled_skips_use_only_its_own_hours():
+    """With the memory path cut (zero hidden state), bin 1's pooled skips must not depend on hours 0-3."""
+    torch.manual_seed(0)
+    model = TornadoConvLSTMUNet(in_channels=3, base_channels=8, hidden_channels=8, pooled_skips=True).eval()
+    for p in list(model.lstm.parameters()) + list(model.hidden_to_bottleneck.parameters()):
+        torch.nn.init.zeros_(p)  # no information through the LSTM, only through the skips
+    x = torch.randn(1, 8, 3, 10, 12)
+    early = x.clone()
+    early[:, :4] += torch.randn_like(early[:, :4])
+    with torch.no_grad():
+        a, b = model(x), model(early)
+    assert torch.allclose(a[:, 1], b[:, 1], atol=1e-6)  # bin 1 ignores hours 0-3 when only skips carry data
+    assert not torch.allclose(a[:, 0], b[:, 0], atol=1e-6)  # bin 0 uses them
+
+
+def test_bottleneck_norm_keeps_the_gates_out_of_saturation_when_encoder_scale_drifts():
+    """The failure seen in the first full study: training grew the encoder's activations until the gate pre-activations reached +-1e5.
+    (An untrained model is fine, so the drift is simulated by scaling up the last bottleneck conv.)"""
+    torch.manual_seed(0)
+    x = torch.randn(1, 8, 3, 10, 12)
+
+    def gate_std(model):
+        with torch.no_grad():
+            conv = model.bottleneck.net[2]
+            conv.weight.mul_(1e4)
+            conv.bias.mul_(1e4)
+        seen = []
+        orig = model.lstm.forward
+        model.lstm.forward = lambda xx, st: (seen.append((model.lstm.x_gates(xx) + model.lstm.h_gates(st[0])).detach()), orig(xx, st))[1]
+        with torch.no_grad():
+            model.eval()(x)
+        return torch.stack(seen).std().item()
+
+    plain = gate_std(TornadoConvLSTMUNet(in_channels=3, base_channels=8, hidden_channels=8))
+    normed = gate_std(TornadoConvLSTMUNet(in_channels=3, base_channels=8, hidden_channels=8, norm_bottleneck=True))
+    assert plain > 100 and normed < 10
