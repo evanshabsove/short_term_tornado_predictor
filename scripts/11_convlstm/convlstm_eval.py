@@ -65,6 +65,7 @@ def main():
     ap.add_argument("--study-dir", type=Path, default=REPO / "models/convlstm/full_study")
     ap.add_argument("--years", type=int, nargs="+", default=[2016, 2020, 2024])
     ap.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
+    ap.add_argument("--prereg", type=Path, default=PREREG, help="pre-registration whose sha256 is recorded in the output")
     ap.add_argument("--boots", type=int, default=1000)
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
@@ -130,7 +131,7 @@ def main():
     summary["folds_paired_ci_excludes_zero"] = int(sum(np.prod(f["paired_diff_ci95"]) > 0 for f in folds))
     summary["confirmed"] = bool(summary["verdict"] == "helps" and summary["folds_paired_ci_excludes_zero"] >= 2)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps({"preregistration_sha256": hashlib.sha256(PREREG.read_bytes()).hexdigest(), "summary": summary, "folds": folds}, indent=1))
+    out_path.write_text(json.dumps({"preregistration_sha256": hashlib.sha256(args.prereg.read_bytes()).hexdigest(), "summary": summary, "folds": folds}, indent=1))
     print(f"pooled E {100 * summary['pooled_E']:+.1f}% | folds positive {summary['folds_positive']}/{len(folds)} | {summary['verdict']} | "
           f"paired CI excludes 0 in {summary['folds_paired_ci_excludes_zero']} | confirmed={summary['confirmed']}")
     print(f"saved {out_path}")

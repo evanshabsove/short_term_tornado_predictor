@@ -86,7 +86,7 @@ def summarize(results: list[dict]) -> dict:
     }
 
 
-def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, scratch_dir: Path, out_dir: Path, epochs: int, drop_columns: list[str] | None = None, seed: int = SEED, ema_decays: tuple[float, ...] = (), cell_mask_name: str = "none", standardize_names: list[str] | None = None) -> dict:
+def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, scratch_dir: Path, out_dir: Path, epochs: int, drop_columns: list[str] | None = None, seed: int = SEED, ema_decays: tuple[float, ...] = (), cell_mask_name: str = "none", standardize_names: list[str] | None = None, lr: float = LR) -> dict:
     cell_mask = resolve_cell_mask(cell_mask_name)  # None for "none": loss and metrics over every cell, as always
     train_runs, test_runs = split_run_bins_year_holdout(run_bins, held_out_year, buffer_hours=BUFFER_HOURS)
 
@@ -127,7 +127,7 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
         model = TornadoUNet(in_channels=len(train_ds.feature_names), base_channels=BASE_CHANNELS)
         train_result = train_model(
             train_ds, model, val_dataset=test_ds, epochs=epochs, batch_size=BATCH_SIZE,
-            lr=LR, alpha=ALPHA, gamma=GAMMA, quiet_keep_fraction=QUIET_KEEP_FRACTION, seed=seed, ema_decays=tuple(ema_decays),
+            lr=lr, alpha=ALPHA, gamma=GAMMA, quiet_keep_fraction=QUIET_KEEP_FRACTION, seed=seed, ema_decays=tuple(ema_decays),
             cell_mask=cell_mask,
         )
         train_result["hyperparameters"]["cell_mask_name"] = cell_mask_name
@@ -195,6 +195,7 @@ def main() -> None:
     parser.add_argument("--drop-columns", nargs="+", default=None, help="variables to drop from each fold's combined data (e.g. the UH columns, which are NaN-filled for runs staged without them)")
     parser.add_argument("--cell-mask", choices=["none", "us_trusted"], default="none", help="us_trusted: exclude Canada/Mexico/other-land cells (no SPC labels there) from the loss and the reported metrics; inputs keep the full grid. Default none = unchanged behavior")
     parser.add_argument("--standardize-extras", action="store_true", help="z-score the extra-field channels (build_hourly.STANDARDIZED_FEATURE_NAMES) with training-split statistics; the base 14 stay raw. Default off = unchanged behavior")
+    parser.add_argument("--lr", type=float, default=LR, help="Adam learning rate (default: the established recipe)")
     parser.add_argument("--years", type=int, nargs="+", default=None, help="restrict to these held-out years (default: every year present in the manifest)")
     args = parser.parse_args()
 
@@ -211,7 +212,7 @@ def main() -> None:
             print(f"\n=== held-out year {year}: already done, skipping ===")
             continue
         print(f"\n=== held-out year {year} ===")
-        fold_result = run_one_fold(year, run_bins, args.staging_dir, args.scratch_dir, args.out_dir, args.epochs, args.drop_columns, args.seed, tuple(args.ema_decays), args.cell_mask, STANDARDIZED_FEATURE_NAMES if args.standardize_extras else None)
+        fold_result = run_one_fold(year, run_bins, args.staging_dir, args.scratch_dir, args.out_dir, args.epochs, args.drop_columns, args.seed, tuple(args.ema_decays), args.cell_mask, STANDARDIZED_FEATURE_NAMES if args.standardize_extras else None, args.lr)
         print(f"  AUC-PR={fold_result['auc_pr']:.4f} AUC-ROC={fold_result['auc_roc']:.4f} "
               f"cohens_d={fold_result['cohens_d']:.2f}  ({fold_result['elapsed_sec']:.0f}s)")
         results.append(fold_result)
