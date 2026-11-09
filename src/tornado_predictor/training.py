@@ -160,6 +160,18 @@ class QuietMapDownsampler(Sampler):
         return len(self.active_idx) + int(len(self.quiet_idx) * self.quiet_keep_fraction)
 
 
+# Held-out metrics recorded every epoch when train_model(epoch_metrics_fn=...) is used (a slim subset of evaluate.compute_metrics).
+EPOCH_METRIC_KEYS = (
+    "auc_pr", "auc_roc", "precision_at_best_f1", "recall_at_best_f1", "f1_at_best_f1", "best_f1_threshold",
+    "mean_proba_positive", "mean_proba_negative", "cohens_d",
+)
+
+
+def slim_epoch_metrics(metrics: dict) -> dict:
+    """The per-epoch subset of a compute_metrics dict (plain floats, JSON-safe)."""
+    return {k: float(metrics[k]) for k in EPOCH_METRIC_KEYS}
+
+
 def evaluate(dataset: DenseGridDataset, model: nn.Module, criterion: nn.Module, batch_size: int = 2, cell_mask: torch.Tensor | None = None) -> float:
     """Mean loss over every sample in dataset, no gradient updates, no
     QuietMapDownsampler (a val set should be evaluated on in full, not
@@ -191,6 +203,11 @@ def train_model(
     ema_decays: tuple[float, ...] = (),
     cell_mask: np.ndarray | None = None,
     grad_clip_norm: float | None = None,
+    epoch_metrics_fn=None,
+    early_stop_fn=None,
+    early_stop_patience: int = 8,
+    early_stop_min_epochs: int = 10,
+    early_stop_decay: float | None = None,
 ) -> dict:
     """Trains model on dataset with FocalLoss + QuietMapDownsampler
     (re-drawing its quiet-map subset each epoch, since DataLoader calls
@@ -219,6 +236,22 @@ def train_model(
     grad_clip_norm (default None = off, behavior and results unchanged): clip the global
     gradient norm to this value after backward and before each optimizer step.
 
+    epoch_metrics_fn (default None = off, training and results unchanged): a callable `model -> dict` of held-out metrics (e.g. slim_epoch_metrics of
+    evaluate.compute_metrics on the held-out scores). When given, it is called after every epoch on the current weights and, for each EMA decay, on the
+    averaged weights (temporarily swapped in, then restored), and the results come back as result["epoch_metrics"] = {"raw": [per-epoch dicts],
+    "ema<decay>": [...]}. It only reads the model, so training is unaffected (tested); it adds one held-out scoring pass per weight set per epoch.
+    The held-out set used here is the year being scored, as everywhere in these studies, so these curves describe training; choosing an epoch from
+    them would be selecting on the test year.
+
+    early_stop_fn (default None = off, training and results unchanged): a callable `model -> dict` that must contain "auc_pr" (e.g. slim_epoch_metrics of
+    evaluate.compute_metrics on a VALIDATION set, never the test year -- stopping on the test year would select on the test data). When given, it is called
+    after every epoch on the monitored weights (the EMA weights of `early_stop_decay`, temporarily swapped in, or the raw weights when `early_stop_decay`
+    is None; a decay must be one of `ema_decays`). The best epoch is the one with the highest AUC-PR (strictly greater than any earlier epoch), and its raw
+    weights AND every EMA weight set are snapshotted. Training stops once at least `early_stop_min_epochs` epochs are done and `early_stop_patience` epochs
+    have passed since the best one; the loop never exceeds `epochs`. At the end the model and the EMA weights are restored to the best epoch, so everything
+    downstream (checkpoints, test scoring) sees best-epoch weights. result["early_stopping"] records the settings, best_epoch, stopped_epoch, stopped_early
+    and the per-epoch validation metrics. It only reads the model, so training up to the stopping epoch is identical to a run without it (tested).
+
     val_dataset should come from split.split_run_bins -- a leakage-safe
     split, not an arbitrary held-out set -- and is evaluated on in full
     each epoch (see evaluate()), never used for gradient updates.
@@ -240,7 +273,12 @@ def train_model(
     loss_history = []
     epoch_seconds = []
     val_loss_history = [] if val_dataset is not None else None
+    epoch_metrics = {"raw": [], **{f"ema{d}": [] for d in ema_decays}} if epoch_metrics_fn is not None else None
+    if early_stop_fn is not None and early_stop_decay is not None and early_stop_decay not in ema_decays:
+        raise ValueError(f"early_stop_decay {early_stop_decay} is not one of ema_decays {tuple(ema_decays)}")
+    stop_history, best_epoch, best_auc_pr, best_raw, best_ema, stopped_early = [], 0, -float("inf"), None, None, False
     for _ in range(epochs):
+        stop_now = False
         epoch_start = time.perf_counter()
         epoch_losses = []
         for X, y in loader:
@@ -261,7 +299,53 @@ def train_model(
         loss_history.append(float(np.mean(epoch_losses)))
         if val_dataset is not None:
             val_loss_history.append(evaluate(val_dataset, model, criterion, batch_size=batch_size, cell_mask=mask_t))
+        if epoch_metrics_fn is not None:
+            epoch_metrics["raw"].append(epoch_metrics_fn(model))
+            for d, ema in ema_params.items():
+                backup = [p.detach().clone() for p in model.parameters()]
+                with torch.no_grad():
+                    for p, e in zip(model.parameters(), ema):
+                        p.copy_(e)
+                try:
+                    epoch_metrics[f"ema{d}"].append(epoch_metrics_fn(model))
+                finally:
+                    with torch.no_grad():
+                        for p, b in zip(model.parameters(), backup):
+                            p.copy_(b)
+        if early_stop_fn is not None:
+            if early_stop_decay is None:
+                monitored = early_stop_fn(model)
+            else:
+                backup = [p.detach().clone() for p in model.parameters()]
+                with torch.no_grad():
+                    for p, e in zip(model.parameters(), ema_params[early_stop_decay]):
+                        p.copy_(e)
+                try:
+                    monitored = early_stop_fn(model)
+                finally:
+                    with torch.no_grad():
+                        for p, b in zip(model.parameters(), backup):
+                            p.copy_(b)
+            stop_history.append(monitored)
+            if monitored["auc_pr"] > best_auc_pr:
+                best_auc_pr, best_epoch = monitored["auc_pr"], len(loss_history)
+                best_raw = [p.detach().clone() for p in model.parameters()]
+                best_ema = {d: [t.clone() for t in ema] for d, ema in ema_params.items()}
+            print(f"  epoch {len(loss_history)}/{epochs} train {loss_history[-1]:.3e} | monitored val AUC-PR {monitored['auc_pr']:.4f} (best {best_auc_pr:.4f} @ {best_epoch}) | {time.perf_counter() - epoch_start:.0f}s", flush=True)
+            stop_now = len(loss_history) >= early_stop_min_epochs and len(loss_history) - best_epoch >= early_stop_patience
+        if epoch_metrics_fn is not None and all({"auc_pr", "recall_at_best_f1", "precision_at_best_f1"} <= v[-1].keys() for v in epoch_metrics.values()):  # progress line (these runs take hours; the log is otherwise silent until the end)
+            line = " | ".join(f"{k} AUC-PR {v[-1]['auc_pr']:.4f} R {v[-1]['recall_at_best_f1']:.3f} P {v[-1]['precision_at_best_f1']:.3f}" for k, v in epoch_metrics.items())
+            print(f"  epoch {len(loss_history)}/{epochs} train {loss_history[-1]:.3e}" + (f" val {val_loss_history[-1]:.3e}" if val_dataset is not None else "") + f" | {line} | {time.perf_counter() - epoch_start:.0f}s", flush=True)
         epoch_seconds.append(time.perf_counter() - epoch_start)  # train + per-epoch validation, wall clock
+        if stop_now:
+            stopped_early = True
+            break
+
+    if early_stop_fn is not None:
+        with torch.no_grad():
+            for p, b in zip(model.parameters(), best_raw):
+                p.copy_(b)
+        ema_params = best_ema
 
     result = {
         "loss_history": loss_history,
@@ -283,6 +367,14 @@ def train_model(
         result["hyperparameters"]["cell_mask_total_cells"] = int(np.asarray(cell_mask).size)
     if val_dataset is not None:
         result["val_loss_history"] = val_loss_history
+    if epoch_metrics is not None:
+        result["epoch_metrics"] = epoch_metrics
+    if early_stop_fn is not None:
+        result["early_stopping"] = {
+            "monitor": "raw" if early_stop_decay is None else f"ema{early_stop_decay}", "metric": "auc_pr",
+            "patience": early_stop_patience, "min_epochs": early_stop_min_epochs, "max_epochs": epochs,
+            "best_epoch": best_epoch, "stopped_epoch": len(loss_history), "stopped_early": stopped_early, "history": stop_history,
+        }
     if ema_params:
         names = [n for n, _ in model.named_parameters()]
         base = {k: v.detach().clone() for k, v in model.state_dict().items()}

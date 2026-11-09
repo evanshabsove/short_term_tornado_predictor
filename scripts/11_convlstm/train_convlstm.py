@@ -24,7 +24,7 @@ import pandas as pd
 from tornado_predictor.build_scaled import load_manifest
 from tornado_predictor.sequence_dataset import DenseSequenceDataset, runs_from_run_bins
 from tornado_predictor.sequence_study import run_list_hash, stratified_run_indices, train_and_evaluate
-from tornado_predictor.split import split_run_bins_year_holdout
+from tornado_predictor.split import split_run_bins, split_run_bins_year_holdout
 from tornado_predictor.time_bins import N_BINS
 
 REPO = Path(__file__).resolve().parents[2]
@@ -43,8 +43,13 @@ def main() -> None:
     ap.add_argument("--hidden-channels", type=int, default=64)
     ap.add_argument("--norm-bottleneck", action="store_true", help="GroupNorm on the bottleneck features before the LSTM (repair arm C)")
     ap.add_argument("--pooled-skips", action="store_true", help="decoder skips = mean and max over the bin's own hours (repair arm C)")
+    ap.add_argument("--dropout", type=float, default=0.0, help="Dropout2d on the LSTM input and on the hidden state fed to the decoder (default off)")
     ap.add_argument("--lr", type=float, default=1e-3, help="Adam learning rate (default: arm A's 1e-3)")
     ap.add_argument("--grad-clip-norm", type=float, default=None, help="clip the global gradient norm (default off)")
+    ap.add_argument("--per-epoch-metrics", action="store_true", help="after every epoch, score the held-out year (raw and EMA weights) and record AUC-PR/ROC and precision/recall/F1 at the best-F1 threshold (extra scoring pass per epoch; training unchanged)")
+    ap.add_argument("--early-stopping", action="store_true", help="hold out a mod-20 validation split of the TRAINING dates and stop when the EMA validation AUC-PR has not improved for --patience epochs (best weights restored); default off = unchanged behavior")
+    ap.add_argument("--patience", type=int, default=8, help="early stopping: epochs without validation AUC-PR improvement before stopping")
+    ap.add_argument("--min-epochs", type=int, default=10, help="early stopping: never stop before this many epochs")
     ap.add_argument("--ema-decays", type=float, nargs="*", default=[0.9999])
     ap.add_argument("--hourly-dir", type=Path, default=REPO / "data/interim/scaled_build_hourly")
     ap.add_argument("--label-dir", type=Path, default=REPO / "data/interim/scaled_build_wholebin")
@@ -56,11 +61,15 @@ def main() -> None:
     manifest = load_manifest(args.label_dir / "manifest.json")
     run_bins = [(pd.Timestamp(k), b) for k, v in manifest.items() if v["status"] == "done" for b in range(N_BINS)]
     train_rb, test_rb = split_run_bins_year_holdout(run_bins, args.fold, buffer_hours=BUFFER_HOURS)
-    train_runs, test_runs = runs_from_run_bins(train_rb), runs_from_run_bins(test_rb)
+    val_rb = []
+    if args.early_stopping:
+        train_rb, val_rb = split_run_bins(train_rb, buffer_hours=BUFFER_HOURS)  # same mod-20 rule and buffer as arm A's early-stopping runs
+    train_runs, test_runs, val_runs = runs_from_run_bins(train_rb), runs_from_run_bins(test_rb), runs_from_run_bins(val_rb)
 
     print(f"fold {args.fold}: {len(train_runs)} train runs, {len(test_runs)} test runs; reading labels...", flush=True)
     train_ds = DenseSequenceDataset(args.hourly_dir, args.label_dir, train_runs)
     test_ds = DenseSequenceDataset(args.hourly_dir, args.label_dir, test_runs)
+    val_ds = DenseSequenceDataset(args.hourly_dir, args.label_dir, val_runs) if args.early_stopping else None
     if args.max_train_runs is not None:
         idx = stratified_run_indices(train_ds.is_active, args.max_train_runs, args.subset_seed)
         train_ds = train_ds.subset(idx)
@@ -80,8 +89,9 @@ def main() -> None:
     res = train_and_evaluate(
         train_ds, test_ds, out_dir=args.out_dir, held_out_year=args.fold, seed=args.seed, epochs=args.epochs,
         batch_size=args.batch_size, base_channels=args.base_channels, hidden_channels=args.hidden_channels,
-        ema_decays=tuple(args.ema_decays), norm_bottleneck=args.norm_bottleneck, pooled_skips=args.pooled_skips,
-        grad_clip_norm=args.grad_clip_norm, lr=args.lr,
+        ema_decays=tuple(args.ema_decays), norm_bottleneck=args.norm_bottleneck, pooled_skips=args.pooled_skips, dropout=args.dropout,
+        grad_clip_norm=args.grad_clip_norm, lr=args.lr, per_epoch_metrics=args.per_epoch_metrics,
+        val_ds=val_ds, patience=args.patience, min_epochs=args.min_epochs,
     )
     res["test_order_matches_arm_a_scores"] = order_checked
     res["max_train_runs"] = args.max_train_runs

@@ -213,3 +213,48 @@ def test_bottleneck_norm_keeps_the_gates_out_of_saturation_when_encoder_scale_dr
     plain = gate_std(TornadoConvLSTMUNet(in_channels=3, base_channels=8, hidden_channels=8))
     normed = gate_std(TornadoConvLSTMUNet(in_channels=3, base_channels=8, hidden_channels=8, norm_bottleneck=True))
     assert plain > 100 and normed < 10
+
+
+def test_dropout_default_is_identity_and_adds_no_parameters():
+    torch.manual_seed(0)
+    a, b = small(), small(dropout=0.0)
+    assert set(a.state_dict()) == set(small(dropout=0.5).state_dict())  # no parameters, old checkpoints load
+    b.load_state_dict(a.state_dict())
+    x = torch.randn(1, 8, 3, 10, 12)
+    a.train(); b.train()
+    assert torch.equal(a(x), b(x))
+
+
+def test_dropout_is_stochastic_in_train_mode_and_off_in_eval_mode():
+    torch.manual_seed(0)
+    m = small(dropout=0.5)
+    x = torch.randn(1, 8, 3, 10, 12)
+    m.train()
+    assert not torch.equal(m(x), m(x))
+    m.eval()
+    with torch.no_grad():
+        assert torch.equal(m(x), m(x))
+
+
+def test_dropout_keeps_bin_0_independent_of_hours_4_to_7():
+    torch.manual_seed(0)
+    m = small(dropout=0.5)
+    m.train()
+    x = torch.randn(1, 8, 3, 10, 12)
+    x2 = x.clone()
+    x2[:, 4:] += torch.randn_like(x2[:, 4:])
+    torch.manual_seed(1); out1 = m(x)
+    torch.manual_seed(1); out2 = m(x2)
+    assert torch.equal(out1[:, 0], out2[:, 0]) and not torch.equal(out1[:, 1], out2[:, 1])
+
+
+def test_dropout_rejects_invalid_rate_and_every_parameter_still_gets_gradient():
+    for bad in (-0.1, 1.0):
+        with pytest.raises(ValueError):
+            small(dropout=bad)
+    torch.manual_seed(0)
+    m = small(dropout=0.3)
+    m.train()
+    out = m(torch.randn(1, 8, 3, 10, 12))
+    FocalLoss()(out, (torch.rand_like(out) > 0.9).float()).backward()
+    assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in m.parameters())

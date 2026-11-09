@@ -11,7 +11,7 @@ import torch
 from tornado_predictor.build_hourly import BASE_FEATURE_NAMES, build_hourly_run, derive_wholebin_run, hourly_run_path
 from tornado_predictor.build_scaled import run_staging_path
 from tornado_predictor.convlstm_unet import TornadoConvLSTMUNet
-from tornado_predictor.evaluate import get_proba_labels
+from tornado_predictor.evaluate import compute_metrics, get_proba_labels
 from tornado_predictor.grid import build_coarse_grid
 from tornado_predictor.inference import assert_feature_order_matches, load_checkpoint
 from tornado_predictor.sequence_dataset import DenseSequenceDataset, flatten_run_bins
@@ -172,3 +172,34 @@ def test_repair_options_flow_into_the_saved_checkpoint(staged, tmp_path):
     assert res["model_hyperparameters"]["norm_bottleneck"] and res["model_hyperparameters"]["pooled_skips"] and res["grad_clip_norm"] == 1.0
     model, _ = load_checkpoint(res["checkpoints"]["raw"])
     assert model.norm_bottleneck is not None and model.pooled_skips
+
+
+def test_per_epoch_metrics_flow_through_train_and_evaluate_and_match_final_metrics(staged, tmp_path):
+    kw = dict(held_out_year=2020, seed=3, epochs=2, base_channels=4, hidden_channels=8, ema_decays=(0.9,))
+    plain = train_and_evaluate(staged.subset([0, 1, 2, 3]), staged.subset([4, 5, 2]), out_dir=tmp_path / "a", **kw)
+    res = train_and_evaluate(staged.subset([0, 1, 2, 3]), staged.subset([4, 5, 2]), out_dir=tmp_path / "b", per_epoch_metrics=True, **kw)
+    assert "epoch_metrics" not in plain
+    assert set(res["epoch_metrics"]) == {"raw", "ema0.9"} and all(len(v) == 2 for v in res["epoch_metrics"].values())
+    json.dumps(res)
+    # the last epoch's per-epoch metrics are the same numbers the final scoring reports (same weights, same held-out set)
+    for name, key in (("raw", "raw"), ("ema0.9", "ema0.9")):
+        assert res["epoch_metrics"][key][-1]["auc_pr"] == pytest.approx(res["metrics"][name]["auc_pr"], rel=1e-9)
+    # and turning the hook on does not change training
+    assert res["loss_history"] == plain["final_train_loss"] or res["loss_history"][-1] == plain["final_train_loss"]
+
+
+def test_early_stopping_flows_through_train_and_evaluate(staged, tmp_path):
+    kw = dict(held_out_year=2020, seed=3, base_channels=4, hidden_channels=8, ema_decays=(0.9,))
+    train, test, val = staged.subset([0, 1, 2, 3]), staged.subset([4, 5, 2]), staged.subset([5, 1])
+    plain = train_and_evaluate(train, test, out_dir=tmp_path / "a", epochs=3, **kw)
+    res = train_and_evaluate(train, test, out_dir=tmp_path / "b", epochs=3, val_ds=val, patience=1, min_epochs=1, **kw)
+    assert "early_stopping" not in plain and "n_val_runs" not in plain
+    es = res["early_stopping"]
+    json.dumps(res)
+    assert res["n_val_runs"] == 2 and es["monitor"] == "ema0.9" and 1 <= es["best_epoch"] <= es["stopped_epoch"] <= 3
+    assert len(es["history"]) == es["stopped_epoch"] == len(res["epoch_seconds"])
+    # the checkpoint carries the best-epoch EMA weights: scoring it reproduces the reported test metric
+    model, _ = load_checkpoint(res["checkpoints"]["ema0.9"])
+    assert np.isclose(compute_metrics(flatten_run_bins(test.y).ravel(), score_runs(model, test).ravel(), include_curves=False)["auc_pr"], res["metrics"]["ema0.9"]["auc_pr"])
+    if es["stopped_epoch"] == 3 and es["best_epoch"] == 3:  # never triggered: identical to the run without early stopping
+        assert res["metrics"]["ema0.9"]["auc_pr"] == plain["metrics"]["ema0.9"]["auc_pr"]

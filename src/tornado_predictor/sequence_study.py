@@ -32,7 +32,7 @@ from tornado_predictor.convlstm_unet import TornadoConvLSTMUNet
 from tornado_predictor.evaluate import compute_metrics
 from tornado_predictor.sequence_dataset import DenseSequenceDataset, flatten_run_bins
 from tornado_predictor.time_bins import N_BINS
-from tornado_predictor.training import train_model
+from tornado_predictor.training import slim_epoch_metrics, train_model
 
 MODEL_CLASS = "TornadoConvLSTMUNet"
 
@@ -102,12 +102,21 @@ def train_and_evaluate(
     lr: float = 1e-3,
     norm_bottleneck: bool = False,
     pooled_skips: bool = False,
+    dropout: float = 0.0,
     grad_clip_norm: float | None = None,
+    per_epoch_metrics: bool = False,
+    val_ds: DenseSequenceDataset | None = None,
+    patience: int = 8,
+    min_epochs: int = 10,
 ) -> dict:
     """Trains one ConvLSTM-U-Net on `train_ds`, tracking loss on `test_ds` each epoch (the held-out
     year, as every year-holdout study here does), saves raw and EMA checkpoints plus float16
     held-out scores under `out_dir`, and returns a results dict. Defaults mirror arm A's recipe
-    except `batch_size=1` run (2 bin-maps per step, matching A's batch of 2 maps)."""
+    except `batch_size=1` run (2 bin-maps per step, matching A's batch of 2 maps).
+
+    `val_ds` (default None = off, unchanged behavior) turns on early stopping: after every epoch the EMA weights (first of `ema_decays`) are scored on `val_ds`
+    -- a validation set carved from the training years, never the held-out test year -- and training stops once the validation AUC-PR has not improved for
+    `patience` epochs (never before `min_epochs`); the best epoch's raw and EMA weights are restored before the test year is scored once."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     hyper = {
@@ -117,18 +126,27 @@ def train_and_evaluate(
         "stop_steps": [3, 7],
         "norm_bottleneck": norm_bottleneck,
         "pooled_skips": pooled_skips,
+        "dropout": dropout,
     }
+    y_true = flatten_run_bins(test_ds.y)
+    y_val = flatten_run_bins(val_ds.y) if val_ds is not None else None
+    if val_ds is not None and not ema_decays:
+        raise ValueError("early stopping monitors an EMA weight set: pass ema_decays")
     t0 = time.time()
     torch.manual_seed(seed)  # weight init; train_model seeds its own sampler
     model = TornadoConvLSTMUNet(**hyper)
     result = train_model(
         train_ds, model, val_dataset=test_ds, epochs=epochs, batch_size=batch_size, lr=lr, alpha=alpha, gamma=gamma,
         quiet_keep_fraction=quiet_keep_fraction, seed=seed, ema_decays=tuple(ema_decays), grad_clip_norm=grad_clip_norm,
+        epoch_metrics_fn=(lambda m: slim_epoch_metrics(compute_metrics(y_true.ravel(), score_runs(m, test_ds).ravel(), include_curves=False))) if per_epoch_metrics else None,
+        **({"early_stop_fn": (lambda m: slim_epoch_metrics(compute_metrics(y_val.ravel(), score_runs(m, val_ds).ravel(), include_curves=False))),
+            "early_stop_decay": tuple(ema_decays)[0], "early_stop_patience": patience, "early_stop_min_epochs": min_epochs} if val_ds is not None else {}),
     )
     train_seconds = time.time() - t0
 
-    meta = {"loss_history": result["loss_history"], "val_loss_history": result["val_loss_history"]}
-    y_true = flatten_run_bins(test_ds.y)
+    meta = {"loss_history": result["loss_history"], "val_loss_history": result["val_loss_history"],
+            **({"epoch_metrics": result["epoch_metrics"]} if per_epoch_metrics else {}),
+            **({"early_stopping": result["early_stopping"]} if val_ds is not None else {})}
     variants = {"raw": model}
     for decay, sd in result.get("ema_state_dicts", {}).items():
         ema = TornadoConvLSTMUNet(**hyper)
@@ -160,6 +178,8 @@ def train_and_evaluate(
         "n_test_runs": len(test_ds),
         "n_test_active_runs": int(test_ds.is_active.sum()),
         "n_test_positive_cells": int(test_ds.y.sum()),
+        **({"n_val_runs": len(val_ds), "n_val_active_runs": int(val_ds.is_active.sum()), "val_run_list_hash": run_list_hash(val_ds.runs),
+            "early_stopping": result["early_stopping"]} if val_ds is not None else {}),
         "train_run_list_hash": run_list_hash(train_ds.runs),
         "train_seconds": train_seconds,
         "epoch_seconds": result["epoch_seconds"],
@@ -170,4 +190,5 @@ def train_and_evaluate(
         "checkpoints": {k: str(v) for k, v in ckpts.items()},
         "scores": {k: str(v) for k, v in score_paths.items()},
         "metrics": metrics,
+        **({"epoch_metrics": result["epoch_metrics"], "loss_history": result["loss_history"], "val_loss_history": result["val_loss_history"]} if per_epoch_metrics else {}),
     }

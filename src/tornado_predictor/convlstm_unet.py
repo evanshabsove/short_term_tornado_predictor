@@ -30,6 +30,12 @@ reproduces the original model exactly, state-dict keys included):
   analogue of arm A's time-mean / time-max), merged back to the skip width by a 1x1 conv shared by both stops. Bin 0 pools hours 0-3, bin 1 hours 4-7;
   the LSTM state still carries hours 0-3 into bin 1. Causality is unchanged: each window ends at its stop.
 
+One optional regularizer (added after the repaired model C3 overfit, val/train loss 2.3-4.2; default 0 = off, reproduces the model exactly):
+
+* `dropout`: channel-wise `Dropout2d(p)` (whole feature maps, the right unit for spatially correlated conv features) on the LSTM's input (the normalized bottleneck
+  features, an independent mask per hour) and on the hidden state handed to the decoder at each stop. Active only in train mode, so scoring and the EMA models are
+  unaffected. It has no parameters, so state dicts are unchanged.
+
 ConvLSTM cell: input-to-gate is a 1x1 conv (the encoder has already done the spatial work),
 hidden-to-gate is a 3x3 conv. The forget-gate bias starts at 1 so memory is kept early in
 training; initial hidden and cell state are zero. A 1x1 conv projects the hidden state back
@@ -79,8 +85,11 @@ class TornadoConvLSTMUNet(nn.Module):
         stop_steps: tuple[int, ...] | list[int] = DEFAULT_STOP_STEPS,
         norm_bottleneck: bool = False,
         pooled_skips: bool = False,
+        dropout: float = 0.0,
     ):
         super().__init__()
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError(f"dropout must be in [0, 1): {dropout}")
         c1, c2, c3, c4 = base_channels, base_channels * 2, base_channels * 4, base_channels * 8
         self.stop_steps = tuple(int(s) for s in stop_steps)
         if list(self.stop_steps) != sorted(set(self.stop_steps)) or min(self.stop_steps) < 0:
@@ -94,6 +103,7 @@ class TornadoConvLSTMUNet(nn.Module):
 
         self.norm_bottleneck = nn.GroupNorm(8, c4) if norm_bottleneck else None
         self.pooled_skips = pooled_skips
+        self.drop = nn.Dropout2d(dropout)  # identity at p=0 and in eval mode
         if pooled_skips:
             self.skip_merge = nn.ModuleList([nn.Conv2d(2 * c, c, kernel_size=1) for c in (c1, c2, c3)])
         self.lstm = ConvLSTMCell(c4, hidden_channels)
@@ -124,13 +134,13 @@ class TornadoConvLSTMUNet(nn.Module):
         bh, bw = bottom.shape[-2:]
         if self.norm_bottleneck is not None:
             bottom = self.norm_bottleneck(bottom)
-        bottom_seq = bottom.reshape(b, t, -1, bh, bw)
+        bottom_seq = self.drop(bottom).reshape(b, t, -1, bh, bw)
         state = (bottom.new_zeros(b, self.lstm.hidden_channels, bh, bw), bottom.new_zeros(b, self.lstm.hidden_channels, bh, bw))
         hidden_at_stop = {}
         for step in range(t):
             state = self.lstm(bottom_seq[:, step], state)
             if step in self.stop_steps:
-                hidden_at_stop[step] = state[0]
+                hidden_at_stop[step] = self.drop(state[0])
 
         starts = (0, *(s + 1 for s in self.stop_steps[:-1]))  # first hour of each stop's own window
 

@@ -38,16 +38,19 @@ import json
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 
 from tornado_predictor.build_scaled import combine_staged_runs, load_manifest
 from tornado_predictor.cell_mask import resolve_cell_mask
-from tornado_predictor.evaluate import evaluate_model
-from tornado_predictor.split import available_years, split_run_bins_year_holdout
+from tornado_predictor.evaluate import evaluate_model, get_proba_labels
+from tornado_predictor.sequence_dataset import runs_from_run_bins
+from tornado_predictor.sequence_study import run_list_hash
+from tornado_predictor.split import available_years, split_run_bins, split_run_bins_year_holdout
 from tornado_predictor.time_bins import N_BINS
 from tornado_predictor.build_hourly import STANDARDIZED_FEATURE_NAMES
-from tornado_predictor.training import DenseGridDataset, standardize_channels, train_model
+from tornado_predictor.training import DenseGridDataset, slim_epoch_metrics, standardize_channels, train_model
 from tornado_predictor.unet import TornadoUNet
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -86,13 +89,20 @@ def summarize(results: list[dict]) -> dict:
     }
 
 
-def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, scratch_dir: Path, out_dir: Path, epochs: int, drop_columns: list[str] | None = None, seed: int = SEED, ema_decays: tuple[float, ...] = (), cell_mask_name: str = "none", standardize_names: list[str] | None = None, lr: float = LR) -> dict:
+def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, scratch_dir: Path, out_dir: Path, epochs: int, drop_columns: list[str] | None = None, seed: int = SEED, ema_decays: tuple[float, ...] = (), cell_mask_name: str = "none", standardize_names: list[str] | None = None, lr: float = LR, per_epoch_metrics: bool = False, early_stopping: bool = False, patience: int = 8, min_epochs: int = 10, grad_clip_norm: float | None = None) -> dict:
     cell_mask = resolve_cell_mask(cell_mask_name)  # None for "none": loss and metrics over every cell, as always
     train_runs, test_runs = split_run_bins_year_holdout(run_bins, held_out_year, buffer_hours=BUFFER_HOURS)
+    val_runs = []
+    if early_stopping:
+        # Validation set for early stopping, carved from the TRAINING years only by the project's mod-20 date rule (split.split_run_bins, 24 h buffer
+        # keeps training dates away from validation dates). The held-out test year is never used to decide when to stop.
+        assert ema_decays, "early stopping monitors an EMA weight set: pass --ema-decays"
+        train_runs, val_runs = split_run_bins(train_runs, buffer_hours=BUFFER_HOURS)
 
     scratch_dir.mkdir(parents=True, exist_ok=True)
     scratch_train = scratch_dir / f"train_heldout_{held_out_year}.nc"
     scratch_test = scratch_dir / f"test_heldout_{held_out_year}.nc"
+    scratch_val = scratch_dir / f"val_heldout_{held_out_year}.nc"
 
     try:
         combine_staged_runs(staging_dir, train_runs).drop_vars(drop_columns or [], errors="ignore").to_netcdf(scratch_train)
@@ -100,6 +110,10 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
 
         train_ds = DenseGridDataset(str(scratch_train))
         test_ds = DenseGridDataset(str(scratch_test))
+        val_ds = None
+        if early_stopping:
+            combine_staged_runs(staging_dir, val_runs).drop_vars(drop_columns or [], errors="ignore").to_netcdf(scratch_val)
+            val_ds = DenseGridDataset(str(scratch_val))
         # Channel order follows the FIRST staged run of each combined set, and staged files from different sources order their
         # variables differently (e.g. UH columns sit after shear in the *_v3 augmented copies but before it in natively-pulled
         # files), so train and test can disagree. Align the test set to the training order so evaluation feeds the model the
@@ -110,6 +124,10 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
             test_ds.X = test_ds.X[:, idx]
             test_ds.feature_names = list(train_ds.feature_names)
             print("  (aligned test-set channel order to the training set's)", flush=True)
+        if val_ds is not None and val_ds.feature_names != train_ds.feature_names:
+            assert set(val_ds.feature_names) == set(train_ds.feature_names), "train/val feature sets differ"
+            val_ds.X = val_ds.X[:, [val_ds.feature_names.index(n) for n in train_ds.feature_names]]
+            val_ds.feature_names = list(train_ds.feature_names)
         # Experiment B: z-score only the named (new) channels with TRAINING-split statistics, leaving the base 14 raw like every earlier
         # model. Stored in each checkpoint as `input_scaling`; inference.apply_input_scaling replays it. Off by default (unchanged behavior).
         input_scaling = None
@@ -118,9 +136,12 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
             assert not missing, f"cannot standardize channels absent from the data: {missing}"
             input_scaling = standardize_channels(train_ds, standardize_names)
             standardize_channels(test_ds, standardize_names, stats=input_scaling)
+            if val_ds is not None:
+                standardize_channels(val_ds, standardize_names, stats=input_scaling)
             print(f"  standardized {len(standardize_names)} channels with training-split statistics", flush=True)
         print(f"  train: {len(train_ds)} ({int(train_ds.is_active.sum())} active) | "
-              f"test (held-out {held_out_year}): {len(test_ds)} ({int(test_ds.is_active.sum())} active)")
+              f"test (held-out {held_out_year}): {len(test_ds)} ({int(test_ds.is_active.sum())} active)"
+              + (f" | validation (early stopping): {len(val_ds)} ({int(val_ds.is_active.sum())} active)" if val_ds is not None else ""))
 
         t0 = time.time()
         torch.manual_seed(seed)
@@ -128,7 +149,10 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
         train_result = train_model(
             train_ds, model, val_dataset=test_ds, epochs=epochs, batch_size=BATCH_SIZE,
             lr=lr, alpha=ALPHA, gamma=GAMMA, quiet_keep_fraction=QUIET_KEEP_FRACTION, seed=seed, ema_decays=tuple(ema_decays),
-            cell_mask=cell_mask,
+            cell_mask=cell_mask, grad_clip_norm=grad_clip_norm,
+            **({"early_stop_fn": (lambda m: slim_epoch_metrics(evaluate_model(m, val_ds, include_curves=False, cell_mask=cell_mask))),
+                "early_stop_decay": tuple(ema_decays)[0], "early_stop_patience": patience, "early_stop_min_epochs": min_epochs} if early_stopping else {}),
+            epoch_metrics_fn=(lambda m: slim_epoch_metrics(evaluate_model(m, test_ds, include_curves=False, cell_mask=cell_mask))) if per_epoch_metrics else None,
         )
         train_result["hyperparameters"]["cell_mask_name"] = cell_mask_name
         metrics = evaluate_model(model, test_ds, include_curves=False, cell_mask=cell_mask)
@@ -139,6 +163,9 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
             ema_model.eval()
             ema_metrics[str(decay)] = evaluate_model(ema_model, test_ds, include_curves=False, cell_mask=cell_mask)
             out_dir.mkdir(parents=True, exist_ok=True)
+            if early_stopping:  # float16 (n_samples, row, col) scores in the test set's own order, for paired ensembling against the ConvLSTM
+                proba, _ = get_proba_labels(ema_model, test_ds)
+                np.save(out_dir / f"scores_heldout_{held_out_year}_ema{decay}.npy", proba.reshape(len(test_ds), *test_ds.y.shape[1:]).astype("float16"))
             torch.save({
                 "model_class": "TornadoUNet", "model_state_dict": sd, "ema_decay": decay,
                 "training_hyperparameters": train_result["hyperparameters"],
@@ -155,6 +182,8 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
             "model_state_dict": model.state_dict(),
             "loss_history": train_result["loss_history"],
             "val_loss_history": train_result["val_loss_history"],
+            **({"epoch_metrics": train_result["epoch_metrics"]} if per_epoch_metrics else {}),
+            **({"early_stopping": train_result["early_stopping"]} if early_stopping else {}),
             "training_hyperparameters": train_result["hyperparameters"],
             "model_hyperparameters": {"in_channels": len(train_ds.feature_names), "base_channels": BASE_CHANNELS},
             "feature_names": train_ds.feature_names,
@@ -164,22 +193,28 @@ def run_one_fold(held_out_year: int, run_bins: list[tuple], staging_dir: Path, s
         return {
             "held_out_year": held_out_year,
             "seed": seed,
+            "lr": lr,
+            "grad_clip_norm": grad_clip_norm,
             "cell_mask": cell_mask_name,
             "n_train": len(train_ds),
             "n_train_active": int(train_ds.is_active.sum()),
             "n_test": len(test_ds),
+            **({"n_val": len(val_ds), "n_val_active": int(val_ds.is_active.sum()), "early_stopping": train_result["early_stopping"],
+                "train_run_list_hash": run_list_hash(runs_from_run_bins(train_runs)), "val_run_list_hash": run_list_hash(runs_from_run_bins(val_runs))} if early_stopping else {}),
             "n_test_active": int(test_ds.is_active.sum()),
             "n_test_positive_cells": int(test_ds.y.sum()),
             "elapsed_sec": elapsed,
             "final_train_loss": train_result["loss_history"][-1],
             "final_val_loss": train_result["val_loss_history"][-1],
             "checkpoint": str(ckpt_path),
+            **({"epoch_metrics": train_result["epoch_metrics"], "loss_history": train_result["loss_history"], "val_loss_history": train_result["val_loss_history"]} if per_epoch_metrics else {}),
             **({"ema_metrics": ema_metrics} if ema_metrics else {}),
             **metrics,
         }
     finally:
         scratch_train.unlink(missing_ok=True)
         scratch_test.unlink(missing_ok=True)
+        scratch_val.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -196,6 +231,11 @@ def main() -> None:
     parser.add_argument("--cell-mask", choices=["none", "us_trusted"], default="none", help="us_trusted: exclude Canada/Mexico/other-land cells (no SPC labels there) from the loss and the reported metrics; inputs keep the full grid. Default none = unchanged behavior")
     parser.add_argument("--standardize-extras", action="store_true", help="z-score the extra-field channels (build_hourly.STANDARDIZED_FEATURE_NAMES) with training-split statistics; the base 14 stay raw. Default off = unchanged behavior")
     parser.add_argument("--lr", type=float, default=LR, help="Adam learning rate (default: the established recipe)")
+    parser.add_argument("--grad-clip-norm", type=float, default=None, help="clip the global gradient norm (default off = the established recipe)")
+    parser.add_argument("--per-epoch-metrics", action="store_true", help="after every epoch, score the held-out year (raw and EMA weights) and record AUC-PR/ROC, precision/recall/F1 at the best-F1 threshold in results (extra scoring pass per epoch; training unchanged)")
+    parser.add_argument("--early-stopping", action="store_true", help="hold out a mod-20 validation split of the TRAINING dates and stop when the EMA validation AUC-PR has not improved for --patience epochs (best weights restored); requires --ema-decays. Default off = unchanged behavior")
+    parser.add_argument("--patience", type=int, default=8, help="early stopping: epochs without validation AUC-PR improvement before stopping")
+    parser.add_argument("--min-epochs", type=int, default=10, help="early stopping: never stop before this many epochs")
     parser.add_argument("--years", type=int, nargs="+", default=None, help="restrict to these held-out years (default: every year present in the manifest)")
     args = parser.parse_args()
 
@@ -212,7 +252,7 @@ def main() -> None:
             print(f"\n=== held-out year {year}: already done, skipping ===")
             continue
         print(f"\n=== held-out year {year} ===")
-        fold_result = run_one_fold(year, run_bins, args.staging_dir, args.scratch_dir, args.out_dir, args.epochs, args.drop_columns, args.seed, tuple(args.ema_decays), args.cell_mask, STANDARDIZED_FEATURE_NAMES if args.standardize_extras else None, args.lr)
+        fold_result = run_one_fold(year, run_bins, args.staging_dir, args.scratch_dir, args.out_dir, args.epochs, args.drop_columns, args.seed, tuple(args.ema_decays), args.cell_mask, STANDARDIZED_FEATURE_NAMES if args.standardize_extras else None, args.lr, args.per_epoch_metrics, args.early_stopping, args.patience, args.min_epochs, args.grad_clip_norm)
         print(f"  AUC-PR={fold_result['auc_pr']:.4f} AUC-ROC={fold_result['auc_roc']:.4f} "
               f"cohens_d={fold_result['cohens_d']:.2f}  ({fold_result['elapsed_sec']:.0f}s)")
         results.append(fold_result)

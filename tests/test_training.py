@@ -309,3 +309,128 @@ def test_train_model_ema_decay_one_stays_at_init(tmp_path):
     result = train_model(DenseGridDataset(str(path)), model, epochs=2, batch_size=2, quiet_keep_fraction=0.5, seed=0, ema_decays=(1.0,))
     for k, v in result["ema_state_dicts"][1.0].items():
         assert torch.allclose(v, init[k])
+
+
+def test_per_epoch_metrics_hook_is_off_by_default(tmp_path):
+    path, _, _ = _tiny_synthetic_nc(tmp_path, n_samples=6, n_active=3)
+    torch.manual_seed(0)
+    result = train_model(DenseGridDataset(str(path)), TornadoCNN(in_channels=2, hidden_channels=4), epochs=2, batch_size=2, quiet_keep_fraction=0.5, seed=0, ema_decays=(0.9,))
+    assert "epoch_metrics" not in result
+
+
+def test_per_epoch_metrics_hook_records_raw_and_ema_and_does_not_change_training(tmp_path):
+    path, _, _ = _tiny_synthetic_nc(tmp_path, n_samples=6, n_active=3)
+    ds = DenseGridDataset(str(path))
+
+    def run(fn):
+        torch.manual_seed(0)
+        model = TornadoCNN(in_channels=2, hidden_channels=4)
+        res = train_model(ds, model, epochs=3, batch_size=2, quiet_keep_fraction=0.5, seed=0, ema_decays=(0.9,), epoch_metrics_fn=fn)
+        return model, res
+
+    seen = []
+    # the hook sees whichever weights are currently loaded: record a fingerprint of the first parameter
+    fn = lambda m: (seen.append(float(next(m.parameters()).detach().sum())) or {"fingerprint": seen[-1]})
+    m_off, r_off = run(None)
+    m_on, r_on = run(fn)
+
+    # training is untouched by the hook: same losses, same final weights, same EMA weights
+    assert r_on["loss_history"] == r_off["loss_history"]
+    for a, b in zip(m_on.parameters(), m_off.parameters()):
+        assert torch.equal(a, b)
+    for k, v in r_off["ema_state_dicts"][0.9].items():
+        assert torch.equal(v, r_on["ema_state_dicts"][0.9][k])
+
+    # one entry per epoch per weight set, raw and EMA, in order raw, ema, raw, ema, ...
+    assert set(r_on["epoch_metrics"]) == {"raw", "ema0.9"}
+    assert len(r_on["epoch_metrics"]["raw"]) == len(r_on["epoch_metrics"]["ema0.9"]) == 3
+    assert len(seen) == 6
+    # the EMA call really saw different (averaged) weights than the raw call of the same epoch, and the raw weights were restored afterwards
+    assert any(r["fingerprint"] != e["fingerprint"] for r, e in zip(r_on["epoch_metrics"]["raw"], r_on["epoch_metrics"]["ema0.9"]))
+
+
+def test_slim_epoch_metrics_keeps_plain_json_floats():
+    import json
+
+    from tornado_predictor.evaluate import compute_metrics
+    from tornado_predictor.training import EPOCH_METRIC_KEYS, slim_epoch_metrics
+
+    rng = np.random.default_rng(0)
+    y = (rng.random(2000) < 0.05).astype(int)
+    out = slim_epoch_metrics(compute_metrics(y, rng.random(2000) * 0.5 + 0.3 * y, include_curves=False))
+    assert set(out) == set(EPOCH_METRIC_KEYS)
+    json.dumps(out)  # plain floats only
+
+
+def _es_run(tmp_path, scores, epochs, **kw):
+    path, _, _ = _tiny_synthetic_nc(tmp_path, n_samples=6, n_active=3)
+    ds = DenseGridDataset(str(path))
+    torch.manual_seed(0)
+    model = TornadoCNN(in_channels=2, hidden_channels=4)
+    it = iter(scores or [])
+    fn = None if scores is None else (lambda m: {"auc_pr": next(it)})
+    res = train_model(ds, model, epochs=epochs, batch_size=2, quiet_keep_fraction=0.5, seed=0, ema_decays=(0.9,), early_stop_fn=fn, **kw)
+    return model, res
+
+
+def test_early_stopping_is_off_by_default(tmp_path):
+    _, res = _es_run(tmp_path, None, 2)
+    assert "early_stopping" not in res and len(res["loss_history"]) == 2
+
+
+def test_early_stopping_stops_after_patience_and_restores_best_epoch_weights(tmp_path):
+    # best at epoch 2 (0.3); patience 3 -> stops once epoch 5 completes
+    model, res = _es_run(tmp_path, [0.1, 0.3, 0.2, 0.2, 0.2, 0.9, 0.9], 7, early_stop_decay=0.9, early_stop_patience=3, early_stop_min_epochs=2)
+    es = res["early_stopping"]
+    assert (es["best_epoch"], es["stopped_epoch"], es["stopped_early"]) == (2, 5, True)
+    assert len(res["loss_history"]) == len(res["val_loss_history"] if "val_loss_history" in res else res["loss_history"]) == 5
+    assert [h["auc_pr"] for h in es["history"]] == [0.1, 0.3, 0.2, 0.2, 0.2]
+    # raw AND EMA weights equal those of a plain 2-epoch run (constant LR, same seed, so epoch 2 of a longer run is a 2-epoch run)
+    ref_model, ref = _es_run(tmp_path, [0.1, 0.3], 2, early_stop_decay=0.9, early_stop_patience=99)
+    for a, b in zip(model.parameters(), ref_model.parameters()):
+        assert torch.equal(a, b)
+    for k, v in ref["ema_state_dicts"][0.9].items():
+        assert torch.equal(v, res["ema_state_dicts"][0.9][k])
+    assert res["loss_history"][:2] == ref["loss_history"]
+
+
+def test_early_stopping_min_epochs_and_cap(tmp_path):
+    # metric only ever falls after epoch 1, but min_epochs=4 delays the stop to epoch 4
+    _, res = _es_run(tmp_path, [0.5, 0.4, 0.3, 0.2, 0.1], 5, early_stop_decay=0.9, early_stop_patience=1, early_stop_min_epochs=4)
+    assert (res["early_stopping"]["best_epoch"], res["early_stopping"]["stopped_epoch"], res["early_stopping"]["stopped_early"]) == (1, 4, True)
+    # always improving: runs to the cap, not flagged as stopped early, best epoch is the last
+    _, res = _es_run(tmp_path, [0.1, 0.2, 0.3], 3, early_stop_decay=0.9, early_stop_patience=1, early_stop_min_epochs=1)
+    assert (res["early_stopping"]["best_epoch"], res["early_stopping"]["stopped_epoch"], res["early_stopping"]["stopped_early"]) == (3, 3, False)
+
+
+def test_early_stopping_monitor_does_not_change_training_and_ema_decay_must_exist(tmp_path):
+    m_on, r_on = _es_run(tmp_path, [0.1, 0.2, 0.3], 3, early_stop_decay=0.9)
+    path, _, _ = _tiny_synthetic_nc(tmp_path, n_samples=6, n_active=3)
+    torch.manual_seed(0)
+    m_off = TornadoCNN(in_channels=2, hidden_channels=4)
+    r_off = train_model(DenseGridDataset(str(path)), m_off, epochs=3, batch_size=2, quiet_keep_fraction=0.5, seed=0, ema_decays=(0.9,))
+    assert r_on["loss_history"] == r_off["loss_history"]
+    for a, b in zip(m_on.parameters(), m_off.parameters()):
+        assert torch.equal(a, b)
+    for k, v in r_off["ema_state_dicts"][0.9].items():
+        assert torch.equal(v, r_on["ema_state_dicts"][0.9][k])
+    with pytest.raises(ValueError):
+        _es_run(tmp_path, [0.1], 1, early_stop_decay=0.123)
+
+
+def test_early_stopping_monitored_ema_weights_are_the_averaged_ones_and_raw_restored(tmp_path):
+    path, _, _ = _tiny_synthetic_nc(tmp_path, n_samples=6, n_active=3)
+    ds = DenseGridDataset(str(path))
+    seen = []
+
+    def fn(m):
+        seen.append(float(next(m.parameters()).detach().sum()))
+        return {"auc_pr": float(len(seen))}
+
+    torch.manual_seed(0)
+    model = TornadoCNN(in_channels=2, hidden_channels=4)
+    raw_seen = []
+    res = train_model(ds, model, epochs=3, batch_size=2, quiet_keep_fraction=0.5, seed=0, ema_decays=(0.9,), early_stop_fn=fn, early_stop_decay=0.9,
+                      epoch_metrics_fn=lambda m: (raw_seen.append(float(next(m.parameters()).detach().sum())) or {"auc_pr": 0.0}))
+    # the raw-weights hook (called in the same epoch) and the early-stop hook saw different weights: early stop saw the EMA
+    assert seen[0] != raw_seen[0] and len(seen) == 3

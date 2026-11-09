@@ -66,6 +66,7 @@ def main():
     ap.add_argument("--years", type=int, nargs="+", default=[2016, 2020, 2024])
     ap.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
     ap.add_argument("--prereg", type=Path, default=PREREG, help="pre-registration whose sha256 is recorded in the output")
+    ap.add_argument("--a-dir", type=Path, default=None, help="matched arm-A study dir (seed<s>/results.json + seed<s>/scores_heldout_<year>_ema0.9999.npy, from cross_validate_year.py --early-stopping). Default: the cached 50-epoch A scores")
     ap.add_argument("--boots", type=int, default=1000)
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
@@ -91,20 +92,36 @@ def main():
             return bs.ap_from_weights(*t, np.ones(D)), np.array([bs.ap_from_weights(*t, w) for w in W])
 
         # Step 0: A from its cached scores, checked against the recorded value before any ConvLSTM score is loaded.
-        A = {s: np.load(dsm.CACHE / f"hourly_wholebin_ema0.9999_s{s}_{year}.npy").astype(np.float32) for s in args.seeds}
+        if args.a_dir is None:
+            A = {s: np.load(dsm.CACHE / f"hourly_wholebin_ema0.9999_s{s}_{year}.npy").astype(np.float32) for s in args.seeds}
+        else:
+            A = {s: np.load(args.a_dir / f"seed{s}/scores_heldout_{year}_ema0.9999.npy").astype(np.float32) for s in args.seeds}
         a_ens = np.mean([A[s] for s in args.seeds], axis=0)
         a_ap, a_boot = ap_boot(a_ens)
-        if tuple(args.seeds) == SEEDS:
+        if args.a_dir is None and tuple(args.seeds) == SEEDS:
             ref = a_ref[year]["vs_baseline"]["arm_ens_ap"]
             assert abs(a_ap - ref) < 1e-6, f"fold {year}: could not reproduce A's ensemble AUC-PR ({a_ap} vs {ref})"
 
         # Checks: every run used A's training runs and A's test order.
         train_rb, _ = split_run_bins_year_holdout(run_bins, year, buffer_hours=24.0)
         expected_hash = run_list_hash(runs_from_run_bins(train_rb))
+        a_es = {}
+        if args.a_dir is not None:  # matched early-stopping study: both arms trained on the same train/validation runs, test order checked below
+            from tornado_predictor.split import split_run_bins
+            t2, v2 = split_run_bins(train_rb, buffer_hours=24.0)
+            expected_hash = run_list_hash(runs_from_run_bins(t2))
+            expected_val_hash = run_list_hash(runs_from_run_bins(v2))
+            for s in args.seeds:
+                fa = next(f for f in json.loads((args.a_dir / f"seed{s}/results.json").read_text())["folds"] if f["held_out_year"] == year)
+                assert fa["train_run_list_hash"] == expected_hash and fa["val_run_list_hash"] == expected_val_hash, f"fold {year} seed {s}: A's train/val runs differ from the expected split"
+                a_es[str(s)] = {k: fa["early_stopping"][k] for k in ("best_epoch", "stopped_epoch", "stopped_early")}
         runs_meta = {}
         for s in args.seeds:
             r = json.loads((args.study_dir / f"seed{s}/fold{year}/results.json").read_text())
             assert r["train_run_list_hash"] == expected_hash, f"fold {year} seed {s}: training runs differ from A's"
+            if args.a_dir is not None:
+                assert r["val_run_list_hash"] == expected_val_hash, f"fold {year} seed {s}: validation runs differ from A's"
+                runs_meta.setdefault("early_stopping_convlstm", {})[str(s)] = {k: r["early_stopping"][k] for k in ("best_epoch", "stopped_epoch", "stopped_early")}
             assert r["test_order_matches_arm_a_scores"] is True, f"fold {year} seed {s}: test order not checked against A"
             runs_meta[str(s)] = {k: r[k] for k in ("final_train_loss", "final_val_loss", "val_over_train_loss", "train_seconds")}
             runs_meta[str(s)]["any_nan_loss"] = bool(not np.isfinite([r["final_train_loss"], r["final_val_loss"]]).all())
@@ -115,7 +132,7 @@ def main():
         c_ap, c_boot = ap_boot(c_ens)
         d = c_boot - a_boot
         row = {
-            "year": int(year), "n_days": int(D), "seeds": list(args.seeds), "train_run_list_hash": expected_hash, "runs": runs_meta,
+            "year": int(year), "n_days": int(D), "seeds": list(args.seeds), "train_run_list_hash": expected_hash, "runs": runs_meta, "early_stopping_a": a_es,
             "convlstm_single_aps": {str(s): ap_boot(C[s])[0] for s in args.seeds},
             "a_single_aps": {str(s): ap_boot(A[s])[0] for s in args.seeds},
             "convlstm_ens_ap": c_ap, "convlstm_ens_ci95": [float(np.percentile(c_boot, 2.5)), float(np.percentile(c_boot, 97.5))],
